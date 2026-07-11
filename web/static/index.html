@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>agent-beacon</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <span>agent-beacon</span>
+    </div>
+    <div class="topbar-right">
+      <span id="conn-status" class="pill">connecting…</span>
+      <button id="logout-btn" class="btn ghost" hidden>Log out</button>
+    </div>
+  </header>
+
+  <!-- Login gate -->
+  <section id="login-view" class="login" hidden>
+    <form id="login-form" class="login-card">
+      <h1>Sign in</h1>
+      <p id="login-hint" class="muted"></p>
+      <input id="password" type="password" placeholder="Server password" autocomplete="current-password" />
+      <button class="btn primary" type="submit">Sign in</button>
+      <p id="login-error" class="error" hidden></p>
+      <a id="sso-link" class="btn primary" hidden>Continue with SSO</a>
+    </form>
+  </section>
+
+  <!-- Main dashboard -->
+  <main id="app-view" class="app" hidden>
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <span>Devices</span>
+        <button id="refresh-btn" class="btn ghost small" title="Refresh">↻</button>
+      </div>
+      <div id="attention-banner" class="attention-banner" hidden></div>
+      <div id="device-list" class="device-list"></div>
+    </aside>
+
+    <section class="stage">
+      <div id="empty-stage" class="empty-stage">
+        <p>Select a managed session to attach a terminal, or an observed process to inspect it.</p>
+      </div>
+
+      <!-- Read-only detail for observed (discovered) processes: metadata only,
+           no interactive terminal. -->
+      <div id="observed-panel" class="observed-panel" hidden>
+        <div class="observed-head">
+          <div class="term-title">
+            <strong id="obs-session"></strong>
+            <span id="obs-meta" class="muted"></span>
+          </div>
+          <span class="badge observed" title="Discovered process — read-only monitor">observed</span>
+        </div>
+        <div class="observed-body">
+          <p class="muted">
+            This is a Claude process discovered on the device. agent-beacon monitors
+            it read-only — there is no interactive terminal for processes it did not
+            start. To get a browser terminal, open a managed session with
+            <strong>Open Session</strong>.
+          </p>
+          <dl id="obs-fields" class="obs-fields"></dl>
+        </div>
+      </div>
+
+      <div id="terminal-panel" class="terminal-panel" hidden>
+        <div class="terminal-head">
+          <div class="term-title">
+            <strong id="term-session"></strong>
+            <span id="term-meta" class="muted"></span>
+          </div>
+          <button id="detach-btn" class="btn ghost small">Detach</button>
+        </div>
+        <div id="terminal" class="terminal-host"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Spawn dialog -->
+  <div id="spawn-modal" class="modal" hidden>
+    <div class="modal-card">
+      <h2>Spawn session</h2>
+      <p class="muted">on <strong id="spawn-device"></strong></p>
+      <label>Project</label>
+      <select id="spawn-project"></select>
+      <label>Command <span class="muted">(default: claude)</span></label>
+      <input id="spawn-command" type="text" placeholder="claude" />
+      <label>Git worktree branch <span class="muted">(optional)</span></label>
+      <input id="spawn-branch" type="text" placeholder="leave empty to run in repo root" />
+      <label>Worktree location</label>
+      <select id="spawn-location">
+        <option value="sibling">Sibling directory</option>
+        <option value="subdirectory">Subdirectory (.worktrees/)</option>
+      </select>
+      <p id="spawn-error" class="error" hidden></p>
+      <div class="modal-actions">
+        <button id="spawn-cancel" class="btn ghost">Cancel</button>
+        <button id="spawn-go" class="btn primary">Spawn</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

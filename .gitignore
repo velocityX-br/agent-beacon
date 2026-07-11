@@ -1,0 +1,26 @@
+# Binaries
+/bin/
+/dist/
+agent-beacon
+*.exe
+
+# Local data / runtime
+/data/
+*.log
+*.token
+
+# Go
+/vendor/
+
+# OS / editor
+.DS_Store
+*.swp
+
+# Planning (local working memory)
+/task_plan.md
+/findings.md
+/progress.md
+/.planning/
+
+# Local exploration notes
+/.project-exploration/

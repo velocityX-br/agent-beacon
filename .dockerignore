@@ -1,0 +1,27 @@
+# Build artifacts
+bin/
+dist/
+agent-beacon
+*.exe
+
+# Runtime / local data
+data/
+*.log
+*.token
+
+# VCS + planning
+.git/
+.planning/
+task_plan.md
+findings.md
+progress.md
+
+# OS / editor
+.DS_Store
+*.swp
+
+# Docs / meta not needed in the image
+README.md
+Makefile
+Dockerfile
+.dockerignore
