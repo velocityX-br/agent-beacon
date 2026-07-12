@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -544,11 +543,15 @@ func (s *Server) handleOrchEventsWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleOrchDiff returns the git diff of the run's repository against HEAD as
-// text/plain, so the browser can inspect and deliver the finished work. It
-// diffs the repo working tree (the delivered branch/worktree changes are what
-// the workers produced). Query param branch selects a specific orch/* branch's
-// diff against HEAD; otherwise the repo-wide diff is returned.
+// handleOrchDiff returns the git diff of the delivered work as text/plain, so
+// the browser can inspect what the workers produced. The changes live in each
+// subtask's isolated worktree (on an orch/* branch), not in the main repo
+// working tree — and workers stage but do not commit, so a plain
+// `git diff HEAD` / `HEAD..branch` in the repo would show nothing. We therefore
+// diff each worktree with orchestrator.WorktreeDiff, which records new files
+// via intent-to-add so brand-new files appear (the same diff the verifier saw).
+// Query param branch selects a single orch/* branch's worktree; otherwise every
+// subtask worktree is diffed and concatenated with per-branch headers.
 func (s *Server) handleOrchDiff(w http.ResponseWriter, r *http.Request) {
 	if !s.browserAuthorized(r) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -560,25 +563,49 @@ func (s *Server) handleOrchDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	branch := r.URL.Query().Get("branch")
-	args := []string{"-C", run.Repo, "diff"}
-	if branch != "" {
-		if !isSafeBranchRef(branch) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid branch"})
-			return
-		}
-		// Diff HEAD..<branch> so the delivered branch's changes are shown.
-		args = append(args, "HEAD.."+branch)
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", args...).CombinedOutput()
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "git diff failed: " + strings.TrimSpace(string(out))})
+	if branch != "" && !isSafeBranchRef(branch) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid branch"})
 		return
 	}
+
+	// The worktree paths come from the finished report's per-subtask results.
+	_, rep := run.detail()
+	if rep == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "run not finished; no diff yet"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	var b strings.Builder
+	multi := len(rep.Results) > 1 && branch == ""
+	for _, res := range rep.Results {
+		if branch != "" && res.Branch != branch {
+			continue
+		}
+		if res.WorktreePath == "" {
+			continue
+		}
+		diff := orchestrator.WorktreeDiff(ctx, run.Repo, res.WorktreePath)
+		if multi {
+			// Delineate each subtask's changes when diffing the whole run.
+			b.WriteString("=== " + res.Branch + " ===\n")
+		}
+		if strings.TrimSpace(diff) != "" {
+			b.WriteString(diff)
+			b.WriteString("\n")
+		} else if multi {
+			b.WriteString("(no changes)\n")
+		}
+		if multi {
+			b.WriteString("\n")
+		}
+	}
+
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(out)
+	_, _ = w.Write([]byte(strings.TrimRight(b.String(), "\n")))
 }
 
 // isSafeBranchRef guards the branch query param against shell/flag injection

@@ -564,6 +564,14 @@ func buildPrompt(st Subtask, feedback string) string {
 	return b.String()
 }
 
+// WorktreeDiff exposes the worktree-vs-HEAD diff for callers outside the
+// package (e.g. the server's diff endpoint), so the browser sees the same
+// changes the verifier reviewed — including brand-new files that a plain
+// `git diff HEAD` omits. Best-effort: returns "" on error.
+func WorktreeDiff(ctx context.Context, repo, wt string) string {
+	return worktreeDiff(ctx, repo, wt)
+}
+
 // worktreeDiff returns the diff of the worktree against the repo's HEAD so the
 // verifier can review the actual changes. Best-effort: returns "" on error.
 func worktreeDiff(ctx context.Context, repo, wt string) string {
