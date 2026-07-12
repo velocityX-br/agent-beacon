@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,55 @@ type Config struct {
 
 	// GateTimeout bounds each individual gate command; 0 => no per-gate limit.
 	GateTimeout time.Duration
+
+	// Emitter, when non-nil, receives progress events as the run proceeds
+	// (plan, per-worker iterations, gates, verdicts, done). It is optional: the
+	// CLI leaves it nil for the original batch behavior. See events.go.
+	Emitter Emitter
+
+	// Intervener, when non-nil, is consulted when the worker loop pauses for a
+	// user decision — authorization of a dangerous operation, or optional
+	// guidance when the iteration budget is exhausted. The server implements
+	// this to block on a per-run response channel. A nil Intervener (the CLI
+	// path and all existing tests) means: authorization auto-DENIED (safe
+	// headless default, which never had danger gating) and no guidance, so the
+	// loop never pauses.
+	Intervener Intervener
+}
+
+// Decision is the outcome of a user intervention: whether to approve the
+// pending action and any free-text guidance to feed back to the coding agent.
+type Decision struct {
+	Approve  bool
+	Guidance string
+}
+
+// InterventionRequest describes why the worker loop is pausing so the UI can
+// present it. Kind is "auth" (dangerous op needs approval) or "input" (optional
+// guidance, e.g. budget exhausted).
+type InterventionRequest struct {
+	ReqID     string
+	SubtaskID string
+	Branch    string
+	Kind      string
+	Summary   string
+	Detail    string
+}
+
+// Intervener blocks until a user decision is available (or the ctx expires, in
+// which case it must return a safe default: Approve=false / empty Guidance).
+type Intervener interface {
+	Await(ctx context.Context, req InterventionRequest) Decision
+}
+
+// awaitDecision consults cfg.Intervener when configured, else returns the safe
+// headless default (deny / no guidance) so a nil Intervener preserves the
+// original non-interactive behavior.
+func awaitDecision(ctx context.Context, cfg Config, req InterventionRequest) Decision {
+	if cfg.Intervener == nil {
+		return Decision{Approve: false}
+	}
+	return cfg.Intervener.Await(ctx, req)
 }
 
 // Subtask is one unit of work assigned to a worker.
@@ -55,14 +105,49 @@ type Subtask struct {
 // WorkerResult captures the outcome of running one subtask to completion (or
 // budget exhaustion).
 type WorkerResult struct {
-	Subtask      Subtask  `json:"subtask"`
-	Passed       bool     `json:"passed"`
-	Iterations   int      `json:"iterations"`
-	WorktreePath string   `json:"worktree_path"`
-	Branch       string   `json:"branch"`
-	Log          []string `json:"log"`
-	VerdictNotes []string `json:"verdict_notes,omitempty"`
-	Error        string   `json:"error,omitempty"`
+	Subtask      Subtask   `json:"subtask"`
+	Passed       bool      `json:"passed"`
+	Iterations   int       `json:"iterations"`
+	WorktreePath string    `json:"worktree_path"`
+	Branch       string    `json:"branch"`
+	Log          []string  `json:"log"`
+	VerdictNotes []string  `json:"verdict_notes,omitempty"`
+	Error        string    `json:"error,omitempty"`
+	StartedAt    time.Time `json:"started_at"`
+	FinishedAt   time.Time `json:"finished_at"`
+	DurationMS   int64     `json:"duration_ms"`
+	// Gates holds the final iteration's deterministic Gate 1 results — the
+	// "testing done" surfaced in the UI.
+	Gates []verify.GateResult `json:"gates,omitempty"`
+	// Artifacts lists the worktree-relative paths changed by the worker,
+	// derived from the final iteration's diff.
+	Artifacts []string `json:"artifacts,omitempty"`
+	// Repairs records each recoverable environment/infra failure the loop
+	// auto-fixed (self-repair), for the report and persisted history.
+	Repairs []RepairRecord `json:"repairs,omitempty"`
+	// Interventions records each user authorization/guidance decision.
+	Interventions []InterventionRecord `json:"interventions,omitempty"`
+}
+
+// RepairRecord is one auto-self-repair action taken by the worker loop when a
+// recoverable environment/infra failure was classified.
+type RepairRecord struct {
+	Iteration int       `json:"iteration"`
+	Kind      string    `json:"kind"`   // "environment" | "logic"
+	Reason    string    `json:"reason"` // short human summary
+	Action    string    `json:"action"` // what was fed back
+	Time      time.Time `json:"time"`
+}
+
+// InterventionRecord captures one user decision (authorization or guidance) at
+// a pause point in the worker loop.
+type InterventionRecord struct {
+	ReqID    string    `json:"req_id"`
+	Kind     string    `json:"kind"` // "auth" | "input"
+	Summary  string    `json:"summary"`
+	Approved bool      `json:"approved"`
+	Guidance string    `json:"guidance,omitempty"`
+	Time     time.Time `json:"time"`
 }
 
 // Report is the structured result of a full orchestration run.
@@ -71,6 +156,7 @@ type Report struct {
 	RepoDir    string         `json:"repo_dir"`
 	StartedAt  time.Time      `json:"started_at"`
 	FinishedAt time.Time      `json:"finished_at"`
+	DurationMS int64          `json:"duration_ms"`
 	Passed     bool           `json:"passed"`
 	Subtasks   int            `json:"subtasks"`
 	Results    []WorkerResult `json:"results"`
@@ -182,9 +268,12 @@ func Run(ctx context.Context, cfg Config, m anthropic.Messenger) (Report, error)
 	subtasks, err := Plan(ctx, cfg, m)
 	if err != nil {
 		report.FinishedAt = time.Now()
+		report.DurationMS = report.FinishedAt.Sub(report.StartedAt).Milliseconds()
+		emit(cfg, Event{Kind: EventRunDone, Passed: boolPtr(false), Message: "planning failed", Detail: err.Error()})
 		return report, err
 	}
 	report.Subtasks = len(subtasks)
+	emit(cfg, Event{Kind: EventPlan, Message: fmt.Sprintf("planned %d subtask(s)", len(subtasks)), Detail: strconv.Itoa(len(subtasks))})
 
 	workers := cfg.Workers
 	if workers < 1 {
@@ -219,6 +308,8 @@ func Run(ctx context.Context, cfg Config, m anthropic.Messenger) (Report, error)
 		}
 	}
 	report.FinishedAt = time.Now()
+	report.DurationMS = report.FinishedAt.Sub(report.StartedAt).Milliseconds()
+	emit(cfg, Event{Kind: EventRunDone, Passed: boolPtr(report.Passed), Message: Summary(report)})
 	return report, nil
 }
 

@@ -40,6 +40,12 @@
       </div>
       <div id="attention-banner" class="attention-banner" hidden></div>
       <div id="device-list" class="device-list"></div>
+
+      <div class="sidebar-head sidebar-head-orch">
+        <span>Orchestrations</span>
+        <button id="orch-new-btn" class="btn ghost small" title="New orchestration run">+</button>
+      </div>
+      <div id="orch-list" class="orch-list"></div>
     </aside>
 
     <section class="stage">
@@ -78,6 +84,66 @@
         </div>
         <div id="terminal" class="terminal-host"></div>
       </div>
+
+      <!-- Orchestration launcher: user types a task + picks an allowed repo,
+           the server runs the multi-agent loop (plan -> parallel worktree
+           workers -> Gate 1 build/test -> Gate 2 cross-model verifier). -->
+      <div id="orch-launch-panel" class="orch-panel" hidden>
+        <div class="orch-head">
+          <div class="term-title">
+            <strong>New orchestration</strong>
+            <span class="muted">autonomous multi-agent loop</span>
+          </div>
+        </div>
+        <form id="orch-form" class="orch-form">
+          <label>Task</label>
+          <textarea id="orch-task" rows="4" placeholder="Describe the task for the agents to build and self-verify…"></textarea>
+          <label>Repository <span class="muted">(must be under a server-allowed root)</span></label>
+          <input id="orch-repo" type="text" placeholder="/absolute/path/to/repo" list="orch-roots" />
+          <datalist id="orch-roots"></datalist>
+          <div class="orch-form-row">
+            <div>
+              <label>Workers</label>
+              <input id="orch-workers" type="number" min="1" max="8" placeholder="auto" />
+            </div>
+            <div>
+              <label>Max iterations</label>
+              <input id="orch-maxiters" type="number" min="1" max="10" placeholder="default" />
+            </div>
+          </div>
+          <label>Test command override <span class="muted">(optional; replaces auto-detected build/test, e.g. <code>python3 -m pytest</code>)</span></label>
+          <input id="orch-testcmd" type="text" placeholder="auto-detect" />
+          <p id="orch-error" class="error" hidden></p>
+          <div class="orch-form-actions">
+            <button class="btn primary" type="submit">Start run</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- Live run view: streams plan/worker/gate/verdict events and shows the
+           final report; a diff view exposes the delivered branch changes. -->
+      <div id="orch-run-panel" class="orch-panel" hidden>
+        <div class="orch-head">
+          <div class="term-title">
+            <strong id="orch-run-title"></strong>
+            <span id="orch-run-meta" class="muted"></span>
+          </div>
+          <div class="orch-run-actions">
+            <span id="orch-run-status" class="pill">running</span>
+            <button id="orch-guide-btn" class="btn ghost small" hidden>Guide</button>
+            <button id="orch-diff-btn" class="btn ghost small">View diff</button>
+          </div>
+        </div>
+        <div class="orch-run-body">
+          <div id="orch-subtasks" class="orch-subtasks"></div>
+          <div class="orch-log-wrap">
+            <div class="orch-log-head">Live log</div>
+            <pre id="orch-log" class="orch-log"></pre>
+          </div>
+          <div id="orch-report" class="orch-report" hidden></div>
+          <pre id="orch-diff" class="orch-diff" hidden></pre>
+        </div>
+      </div>
     </section>
   </main>
 
@@ -101,6 +167,23 @@
       <div class="modal-actions">
         <button id="spawn-cancel" class="btn ghost">Cancel</button>
         <button id="spawn-go" class="btn primary">Spawn</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Intervention dialog: shown when a run pauses for dangerous-op
+       authorization or optional guidance (budget exhausted / proactive). -->
+  <div id="orch-input-modal" class="modal" hidden>
+    <div class="modal-card">
+      <h2 id="orch-input-title">Run paused</h2>
+      <p id="orch-input-summary" class="muted"></p>
+      <pre id="orch-input-detail" class="orch-input-detail" hidden></pre>
+      <label>Guidance <span class="muted">(optional; fed to the coding agent)</span></label>
+      <textarea id="orch-input-guidance" rows="3" placeholder="Add instructions to steer the next iteration…"></textarea>
+      <p id="orch-input-error" class="error" hidden></p>
+      <div class="modal-actions">
+        <button id="orch-input-deny" class="btn ghost">Deny</button>
+        <button id="orch-input-approve" class="btn primary">Approve &amp; continue</button>
       </div>
     </div>
   </div>

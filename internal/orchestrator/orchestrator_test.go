@@ -115,7 +115,7 @@ func TestVerifyParsesVerdict(t *testing.T) {
 func TestWorkerStopsOnFirstPass(t *testing.T) {
 	restore := swapSeams(
 		func(_ context.Context, _, _, _ string) (string, error) { return "/wt", nil },
-		func(_ context.Context, _ Config, _ string, _ Subtask, _ string) error { return nil },
+		func(_ context.Context, _ Config, _ string, _ Subtask, _ string, _ int) ([]DangerHit, error) { return nil, nil },
 		func(_ context.Context, _ Config, _ string) []verify.GateResult {
 			return []verify.GateResult{{Name: "test", Passed: true}}
 		},
@@ -140,9 +140,9 @@ func TestWorkerFeedsGateOutputIntoRepairPrompt(t *testing.T) {
 	agentPrompts := []string{}
 	restore := swapSeams(
 		func(_ context.Context, _, _, _ string) (string, error) { return "/wt", nil },
-		func(_ context.Context, _ Config, _ string, _ Subtask, feedback string) error {
+		func(_ context.Context, _ Config, _ string, _ Subtask, feedback string, _ int) ([]DangerHit, error) {
 			agentPrompts = append(agentPrompts, feedback)
-			return nil
+			return nil, nil
 		},
 		func(_ context.Context, _ Config, _ string) []verify.GateResult {
 			gateCalls++
@@ -174,7 +174,7 @@ func TestWorkerFeedsGateOutputIntoRepairPrompt(t *testing.T) {
 func TestWorkerExhaustsBudget(t *testing.T) {
 	restore := swapSeams(
 		func(_ context.Context, _, _, _ string) (string, error) { return "/wt", nil },
-		func(_ context.Context, _ Config, _ string, _ Subtask, _ string) error { return nil },
+		func(_ context.Context, _ Config, _ string, _ Subtask, _ string, _ int) ([]DangerHit, error) { return nil, nil },
 		func(_ context.Context, _ Config, _ string) []verify.GateResult {
 			return []verify.GateResult{{Name: "test", Passed: true}}
 		},
@@ -195,10 +195,63 @@ func TestWorkerExhaustsBudget(t *testing.T) {
 	}
 }
 
+func TestChangedFilesFromDiff(t *testing.T) {
+	diff := "diff --git a/foo.go b/foo.go\n" +
+		"--- a/foo.go\n+++ b/foo.go\n@@ -0,0 +1 @@\n+package main\n" +
+		"diff --git a/sub/bar.py b/sub/bar.py\n" +
+		"--- /dev/null\n+++ b/sub/bar.py\n@@ -0,0 +1 @@\n+print()\n" +
+		"diff --git a/gone.txt b/gone.txt\n--- a/gone.txt\n+++ /dev/null\n"
+	got := changedFilesFromDiff(diff)
+	want := []string{"foo.go", "sub/bar.py"}
+	if len(got) != len(want) {
+		t.Fatalf("changedFilesFromDiff got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("changedFilesFromDiff[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if changedFilesFromDiff("") != nil {
+		t.Errorf("empty diff should yield nil")
+	}
+}
+
+func TestWorkerCapturesGatesArtifactsTiming(t *testing.T) {
+	restore := swapSeams(
+		func(_ context.Context, _, _, _ string) (string, error) { return "/wt", nil },
+		func(_ context.Context, _ Config, _ string, _ Subtask, _ string, _ int) ([]DangerHit, error) { return nil, nil },
+		func(_ context.Context, _ Config, _ string) []verify.GateResult {
+			return []verify.GateResult{{Name: "go test", Passed: true}}
+		},
+		func(_ context.Context, _, _ string) string { return "--- a/foo.go\n+++ b/foo.go\n" },
+	)
+	defer restore()
+
+	m := &stubMessenger{responses: []anthropic.Response{
+		toolResp(verdictToolName, map[string]any{"verdict": "pass", "reasons": []string{"ok"}}),
+	}}
+	res := RunWorker(context.Background(), Config{MaxIters: 2}, Subtask{Goal: "g", Branch: "orch/x"}, m)
+	if !res.Passed {
+		t.Fatalf("expected pass, got %+v", res)
+	}
+	if len(res.Gates) != 1 || res.Gates[0].Name != "go test" {
+		t.Errorf("gates not captured: %+v", res.Gates)
+	}
+	if len(res.Artifacts) != 1 || res.Artifacts[0] != "foo.go" {
+		t.Errorf("artifacts not captured: %+v", res.Artifacts)
+	}
+	if res.DurationMS < 0 {
+		t.Errorf("duration should be non-negative, got %d", res.DurationMS)
+	}
+	if res.StartedAt.IsZero() || res.FinishedAt.IsZero() {
+		t.Errorf("timing not stamped: start=%v finish=%v", res.StartedAt, res.FinishedAt)
+	}
+}
+
 // swapSeams overrides the worker's external seams and returns a restore func.
 func swapSeams(
 	cw func(context.Context, string, string, string) (string, error),
-	ra func(context.Context, Config, string, Subtask, string) error,
+	ra func(context.Context, Config, string, Subtask, string, int) ([]DangerHit, error),
 	rg func(context.Context, Config, string) []verify.GateResult,
 	wd func(context.Context, string, string) string,
 ) func() {

@@ -111,6 +111,15 @@ func CreateWorktree(ctx context.Context, repo, branch, location string) (string,
 	return createWorktree(ctx, repo, branch, location)
 }
 
+// ResolveUnderRoot verifies that projectPath is a real directory under one of
+// the allowed roots (symlink-resolved), returning the resolved absolute path.
+// It is the exported form of the same path-boundary check the spawn handler
+// uses, so browser-initiated orchestration runs can only target server-approved
+// workspaces — never arbitrary host paths.
+func ResolveUnderRoot(roots []string, projectPath string) (string, error) {
+	return resolveSpawnTarget(roots, projectPath)
+}
+
 // resolveSpawnTarget verifies the requested project path is a real directory
 // under one of the allowed roots (symlink-resolved), preventing traversal to
 // arbitrary host paths from a dashboard request.

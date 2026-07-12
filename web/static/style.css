@@ -54,6 +54,8 @@ body { display: flex; flex-direction: column; height: 100vh; }
 }
 .pill.online { color: var(--ok); border-color: var(--ok); }
 .pill.offline { color: var(--err); border-color: var(--err); }
+.pill.running { color: var(--accent); border-color: var(--accent); }
+.pill.waiting { color: var(--warn); border-color: var(--warn); background: rgba(210,153,34,.12); }
 
 .btn {
   border: 1px solid var(--border);
@@ -280,3 +282,161 @@ body { display: flex; flex-direction: column; height: 100vh; }
 }
 .modal-card input:focus, .modal-card select:focus { outline: none; border-color: var(--accent); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+/* Orchestrations sidebar list */
+.sidebar-head-orch { border-top: 1px solid var(--border); }
+.orch-list { overflow-y: auto; padding: 8px; max-height: 40%; }
+.orch-card {
+  padding: 10px 12px;
+  margin: 4px 0;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.orch-card:hover { border-color: var(--accent); }
+.orch-card.active { border-color: var(--accent); background: #223047; }
+.orch-card .row1 { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.orch-card .cmd { font-weight: 600; font-size: 13px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.orch-card .meta { font-size: 11px; color: var(--fg-muted); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Orchestration stage panels (launcher + live run) */
+.orch-panel { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.orch-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+.orch-run-actions { display: flex; align-items: center; gap: 10px; }
+
+/* Launcher form */
+.orch-form { padding: 18px 20px; display: flex; flex-direction: column; gap: 6px; max-width: 640px; overflow-y: auto; }
+.orch-form label { font-size: 12px; color: var(--fg-muted); margin-top: 8px; }
+.orch-form textarea, .orch-form input {
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 14px;
+  font-family: inherit;
+  resize: vertical;
+}
+.orch-form textarea:focus, .orch-form input:focus { outline: none; border-color: var(--accent); }
+.orch-form-row { display: flex; gap: 12px; }
+.orch-form-row > div { flex: 1; display: flex; flex-direction: column; }
+.orch-form-actions { margin-top: 14px; }
+
+/* Live run body: subtask cards, log pane, report, diff */
+.orch-run-body { flex: 1; overflow-y: auto; padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; }
+.orch-subtasks { display: flex; flex-direction: column; gap: 10px; }
+.orch-subtask {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.orch-subtask-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.orch-subtask-head strong { font-size: 14px; }
+.orch-steps { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.orch-step { font-size: 13px; color: var(--fg-muted); }
+.orch-step.ok { color: var(--ok); }
+.orch-step.err { color: var(--err); }
+
+.orch-log-wrap { display: flex; flex-direction: column; }
+.orch-log-head { font-size: 12px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
+.orch-log {
+  margin: 0;
+  padding: 10px 12px;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg);
+  font-family: Menlo, Monaco, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 260px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.orch-report {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.orch-report-head { font-weight: 600; margin-bottom: 8px; }
+.orch-report-summary { display: flex; flex-wrap: wrap; gap: 12px; font-size: 13px; color: var(--fg-muted); margin-bottom: 10px; }
+.orch-report-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 0; border-top: 1px solid var(--border); }
+.orch-report-row:first-of-type { border-top: none; }
+.orch-report-row .muted { flex-basis: 100%; }
+
+.orch-subtask-goal { font-size: 13px; color: var(--fg-muted); margin: 6px 0; flex-basis: 100%; }
+.orch-artifacts { list-style: none; margin: 6px 0 0; padding: 0; font-family: Menlo, Monaco, monospace; font-size: 12px; flex-basis: 100%; }
+.orch-artifacts li { color: var(--fg); padding: 1px 0; }
+
+/* Self-repair notes: recoverable env/infra failures the loop auto-fixed. */
+.orch-repair { font-size: 12px; color: var(--warn); flex-basis: 100%; margin: 2px 0; }
+
+/* Intervention modal: the flagged command / detail shown before a decision. */
+.orch-input-detail {
+  margin: 6px 0 0;
+  max-height: 140px;
+  overflow-y: auto;
+  background: #000;
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: Menlo, Monaco, monospace;
+  font-size: 12px;
+  color: var(--warn);
+  white-space: pre-wrap;
+}
+.modal-card textarea {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--bg-input, var(--bg-panel));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+.modal-card textarea:focus { outline: none; border-color: var(--accent); }
+.orch-gate-output {
+  flex-basis: 100%;
+  max-height: 120px;
+  overflow-y: auto;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  white-space: pre-wrap;
+  margin: 2px 0 6px;
+}
+
+/* The run title carries the full prompt — allow it to wrap rather than clip. */
+#orch-run-title { white-space: normal; overflow-wrap: anywhere; }
+
+.orch-diff {
+  margin: 0;
+  padding: 12px 14px;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg);
+  font-family: Menlo, Monaco, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}

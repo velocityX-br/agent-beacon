@@ -18,6 +18,7 @@ import (
 
 	"nhooyr.io/websocket"
 
+	"github.com/local/agent-beacon/internal/anthropic"
 	"github.com/local/agent-beacon/internal/auth"
 	"github.com/local/agent-beacon/internal/registry"
 	"github.com/local/agent-beacon/pkg/protocol"
@@ -47,6 +48,37 @@ type Config struct {
 	OIDC *auth.OIDCProvider
 	// SessionTTL controls how long browser session cookies remain valid.
 	SessionTTL time.Duration
+
+	// --- Orchestration wiring (UI-driven multi-agent loop) ---
+	// Anthropic credentials for the server-owned Messenger. AnthropicKey uses
+	// x-api-key style; AnthropicBearer uses the Claude Code proxy/gateway
+	// Bearer style; AnthropicBaseURL overrides the default endpoint. These live
+	// only server-side and are never logged or returned to the browser.
+	AnthropicKey     string
+	AnthropicBearer  string
+	AnthropicBaseURL string
+	// Model roles for browser-launched orchestration runs. The verifier should
+	// differ from the worker so the cross-model check is genuinely independent.
+	PlannerModel  string
+	WorkerModel   string
+	VerifierModel string
+	// WorkerCmd is the coding-agent binary the workers run (default "claude").
+	WorkerCmd string
+	// OrchestrationRoots is the allowlist of repository roots a browser run may
+	// target. A requested repo must resolve (symlinks included) under one of
+	// these, so the web can never write to arbitrary host paths.
+	OrchestrationRoots []string
+	// OrchestrationTimeout bounds a browser-launched run's total wall-clock.
+	// 0 => no limit.
+	OrchestrationTimeout time.Duration
+	// InterventionTimeout bounds each user-intervention wait (dangerous-op
+	// authorization or guidance-on-exhaustion). On timeout the run resumes with
+	// the safe default (deny / no guidance) so it never hangs. Default 10m.
+	InterventionTimeout time.Duration
+	// OrchestrationStateDir is where finished run reports are persisted as
+	// JSON and reloaded on startup, so run history survives a restart. Empty
+	// disables persistence (in-memory only).
+	OrchestrationStateDir string
 }
 
 // Server is the running dashboard server.
@@ -55,6 +87,8 @@ type Server struct {
 	reg      *registry.Registry
 	log      *slog.Logger
 	sessions *auth.Store
+	orch     *orchStore
+	msgr     anthropic.Messenger
 }
 
 // New constructs a Server with sane defaults.
@@ -68,14 +102,28 @@ func New(cfg Config, log *slog.Logger) *Server {
 	if cfg.LogoutURL == "" {
 		cfg.LogoutURL = "/api/v1/logout"
 	}
+	if cfg.InterventionTimeout <= 0 {
+		cfg.InterventionTimeout = 10 * time.Minute
+	}
 	if log == nil {
 		log = slog.Default()
+	}
+	// Build the server-owned Messenger for browser-launched orchestration runs
+	// when credentials are configured. Left nil otherwise — the orchestration
+	// routes then refuse with a clear error rather than panicking.
+	var msgr anthropic.Messenger
+	if cfg.AnthropicKey != "" || cfg.AnthropicBearer != "" {
+		msgr = anthropic.New(cfg.AnthropicKey).
+			WithBaseURL(cfg.AnthropicBaseURL).
+			WithBearerToken(cfg.AnthropicBearer)
 	}
 	return &Server{
 		cfg:      cfg,
 		reg:      registry.New(cfg.HeartbeatTTL),
 		log:      log,
 		sessions: auth.NewStore(cfg.SessionTTL),
+		orch:     newOrchStore(cfg.OrchestrationStateDir),
+		msgr:     msgr,
 	}
 }
 
@@ -93,6 +141,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/auth/callback", s.handleAuthCallback)
 	mux.HandleFunc("GET /api/v1/sessions", s.handleSessions)
 	mux.HandleFunc("POST /api/v1/spawn", s.handleSpawn)
+	// UI-driven multi-agent orchestration: launch a run, list/inspect runs,
+	// stream live progress over WS, and fetch the delivered diff.
+	mux.HandleFunc("POST /api/v1/orchestrations", s.handleOrchStart)
+	mux.HandleFunc("GET /api/v1/orchestrations", s.handleOrchList)
+	mux.HandleFunc("GET /api/v1/orchestrations/{id}", s.handleOrchGet)
+	mux.HandleFunc("GET /api/v1/orchestrations/{id}/events", s.handleOrchEventsWS)
+	mux.HandleFunc("GET /api/v1/orchestrations/{id}/diff", s.handleOrchDiff)
+	mux.HandleFunc("POST /api/v1/orchestrations/{id}/respond", s.handleOrchRespond)
 	mux.HandleFunc("/api/v1/agent/connect", s.handleAgentWS)
 	mux.HandleFunc("/api/v1/terminal/{id}", s.handleTerminalWS)
 	// Dashboard SPA: serve embedded static assets, falling back to index.html

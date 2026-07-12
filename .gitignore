@@ -1,7 +1,7 @@
 # Binaries
 /bin/
 /dist/
-agent-beacon
+/agent-beacon
 *.exe
 
 # Local data / runtime

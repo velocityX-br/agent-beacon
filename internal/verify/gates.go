@@ -16,10 +16,10 @@ type Gate struct {
 
 // GateResult is the outcome of running one Gate.
 type GateResult struct {
-	Name    string // mirrors Gate.Name
-	Passed  bool   // true when the command exited 0
-	Output  string // combined stdout+stderr (trimmed)
-	Err     string // non-empty when the command failed to run or exited non-zero
+	Name   string `json:"name"`             // mirrors Gate.Name
+	Passed bool   `json:"passed"`           // true when the command exited 0
+	Output string `json:"output,omitempty"` // combined stdout+stderr (trimmed)
+	Err    string `json:"err,omitempty"`    // non-empty when the command failed to run or exited non-zero
 }
 
 // GatesFromLanguages expands detected languages into ordered gates (build, then
