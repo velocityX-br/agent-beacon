@@ -343,8 +343,9 @@
     detach();
     activeSessionID = id;
 
-    el("empty-stage").hidden = true;
-    el("observed-panel").hidden = true;
+    closeOrchSocket();
+    orchActiveRunID = null;
+    hideAllStagePanels();
     el("terminal-panel").hidden = false;
     el("term-session").textContent = (hb && hb.command) || id;
     el("term-meta").textContent = id;
@@ -374,14 +375,24 @@
     poll();
   }
 
+  // hideAllStagePanels is the single source of truth for stage visibility.
+  // Every "show" entry point calls this first, then reveals only its own panel,
+  // guaranteeing exactly one stage panel is ever visible.
+  function hideAllStagePanels() {
+    el("empty-stage").hidden = true;
+    el("observed-panel").hidden = true;
+    el("terminal-panel").hidden = true;
+    el("orch-launch-panel").hidden = true;
+    el("orch-run-panel").hidden = true;
+  }
+
   function detach() {
     if (termSocket) {
       try { termSocket.close(); } catch { /* ignore */ }
       termSocket = null;
     }
     activeSessionID = null;
-    el("terminal-panel").hidden = true;
-    el("observed-panel").hidden = true;
+    hideAllStagePanels();
     el("empty-stage").hidden = false;
   }
 
@@ -394,8 +405,9 @@
     activeSessionID = s.id;
     const hb = s.heartbeat || {};
 
-    el("empty-stage").hidden = true;
-    el("terminal-panel").hidden = true;
+    closeOrchSocket();
+    orchActiveRunID = null;
+    hideAllStagePanels();
     el("observed-panel").hidden = false;
     el("obs-session").textContent = hb.command || s.id;
     el("obs-meta").textContent = s.id;
@@ -544,6 +556,20 @@
       st.className = statusPillClass(run.status, run.passed);
       st.textContent = run.status === "done" ? (run.passed ? "pass" : "fail") : run.status;
       row1.appendChild(st);
+
+      // Delete button: removes a finished run from the store and disk. Hidden
+      // for active runs (running/waiting) since the server refuses those (409).
+      if (run.status === "done" || run.status === "error") {
+        const del = document.createElement("button");
+        del.className = "orch-del";
+        del.title = "Delete run";
+        del.textContent = "\u2715"; // ✕
+        del.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          deleteRun(run.id);
+        });
+        row1.appendChild(del);
+      }
       card.appendChild(row1);
 
       const meta = document.createElement("div");
@@ -556,16 +582,36 @@
     }
   }
 
+  // deleteRun removes a finished run via DELETE and refreshes the list so the
+  // card disappears immediately. If the deleted run is the one open in the
+  // panel, reset back to the launcher view. A 409 (active run) or other error
+  // is surfaced via a brief alert; the list is refreshed regardless.
+  async function deleteRun(id) {
+    if (!confirm("Delete this orchestration run? This cannot be undone.")) return;
+    try {
+      const r = await fetch("/api/v1/orchestrations/" + encodeURIComponent(id), {
+        method: "DELETE",
+        credentials: "same-origin",
+      });
+      if (!r.ok && r.status !== 204) {
+        const d = await r.json().catch(() => ({}));
+        alert(d.error || "Failed to delete run (" + r.status + ")");
+      } else if (id === orchActiveRunID) {
+        showOrchLaunch();
+      }
+    } catch (e) {
+      alert("Failed to delete run");
+    }
+    renderOrchList();
+  }
+
   // ---- Launcher -------------------------------------------------------------
 
   function showOrchLaunch() {
     detach();
     closeOrchSocket();
     orchActiveRunID = null;
-    el("empty-stage").hidden = true;
-    el("observed-panel").hidden = true;
-    el("terminal-panel").hidden = true;
-    el("orch-run-panel").hidden = true;
+    hideAllStagePanels();
     el("orch-launch-panel").hidden = false;
     el("orch-error").hidden = true;
     // Populate the allowed-roots datalist for convenience.
@@ -653,10 +699,7 @@
     closeInterventionModal();
     el("orch-guide-btn").hidden = true;
 
-    el("empty-stage").hidden = true;
-    el("observed-panel").hidden = true;
-    el("terminal-panel").hidden = true;
-    el("orch-launch-panel").hidden = true;
+    hideAllStagePanels();
     el("orch-run-panel").hidden = false;
 
     el("orch-subtasks").innerHTML = "";

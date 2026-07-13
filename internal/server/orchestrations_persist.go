@@ -75,6 +75,21 @@ func (s *orchStore) persist(r *orchRun) error {
 	return os.Rename(tmp, path)
 }
 
+// removePersisted deletes a run's JSON file from disk. It reuses persistPath so
+// the same filename-safety check (no path separators / traversal) applies. A
+// missing file — or no configured persistDir — is not an error: the goal state
+// is "the file no longer exists", which is already satisfied.
+func (s *orchStore) removePersisted(id string) error {
+	path := persistPath(s.persistDir, id)
+	if path == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // loadPersisted scans dir for *.json run files and returns reconstructed
 // orchRuns keyed by id. Runs are rehydrated as already-finished (done=true,
 // no live subscribers) so the list/detail endpoints and events WS treat them

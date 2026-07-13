@@ -299,6 +299,8 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .orch-card .row1 { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .orch-card .cmd { font-weight: 600; font-size: 13px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .orch-card .meta { font-size: 11px; color: var(--fg-muted); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.orch-del { flex: none; border: none; background: transparent; color: var(--fg-muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 2px 4px; border-radius: 4px; }
+.orch-del:hover { color: #fff; background: var(--danger, #a4262c); }
 
 /* Orchestration stage panels (launcher + live run) */
 .orch-panel { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }

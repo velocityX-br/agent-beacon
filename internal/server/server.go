@@ -146,6 +146,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/orchestrations", s.handleOrchStart)
 	mux.HandleFunc("GET /api/v1/orchestrations", s.handleOrchList)
 	mux.HandleFunc("GET /api/v1/orchestrations/{id}", s.handleOrchGet)
+	mux.HandleFunc("DELETE /api/v1/orchestrations/{id}", s.handleOrchDelete)
 	mux.HandleFunc("GET /api/v1/orchestrations/{id}/events", s.handleOrchEventsWS)
 	mux.HandleFunc("GET /api/v1/orchestrations/{id}/diff", s.handleOrchDiff)
 	mux.HandleFunc("POST /api/v1/orchestrations/{id}/respond", s.handleOrchRespond)

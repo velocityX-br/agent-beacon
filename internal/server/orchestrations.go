@@ -238,6 +238,12 @@ func (r *orchRun) detail() (runView, *orchestrator.Report) {
 	return v, &rep
 }
 
+// errRunActive is returned by orchStore.delete when the caller tries to remove
+// a run that is still running or waiting for user intervention. Deleting such a
+// run would orphan its background goroutine and worktree, so the delete is
+// rejected and the handler maps this to HTTP 409 Conflict.
+var errRunActive = errors.New("run is active")
+
 // orchStore is the in-process set of orchestration runs. Like the registry it
 // is single-replica, RWMutex-guarded, and holds all state in memory. When
 // persistDir is set, finished runs are written there as JSON and reloaded on
@@ -313,6 +319,32 @@ func (s *orchStore) list() []runView {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt.After(out[j].StartedAt) })
 	return out
+}
+
+// delete removes a finished run from the store and its persisted JSON file. It
+// refuses to delete an active run (running/waiting) — returning errRunActive —
+// so the background orchestrator goroutine (and its worktrees) is never
+// orphaned by a mid-flight deletion. The (found, err) result lets the handler
+// distinguish a 404 (found=false) from a 409 (errRunActive) from success.
+func (s *orchStore) delete(id string) (found bool, err error) {
+	s.mu.Lock()
+	r, ok := s.runs[id]
+	if !ok {
+		s.mu.Unlock()
+		return false, nil
+	}
+	r.mu.RLock()
+	active := r.status == statusRunning || r.status == statusWaiting
+	r.mu.RUnlock()
+	if active {
+		s.mu.Unlock()
+		return true, errRunActive
+	}
+	delete(s.runs, id)
+	s.mu.Unlock()
+	// Remove the on-disk copy outside the lock; a failure here is returned so
+	// the handler can surface it, but the run is already gone from memory.
+	return true, s.removePersisted(id)
 }
 
 // newRunID returns a short random identifier for an orchestration run.
@@ -423,6 +455,32 @@ func (s *Server) handleOrchGet(w http.ResponseWriter, r *http.Request) {
 	}
 	v, rep := run.detail()
 	writeJSON(w, http.StatusOK, orchDetailResp{Run: v, Report: rep})
+}
+
+// handleOrchDelete removes a finished run from the store and deletes its
+// persisted JSON file, so it disappears from the list immediately (no restart
+// needed). It is browser-gated like the other handlers. An unknown id returns
+// 404; an active (running/waiting) run returns 409 and is left untouched; a
+// successful delete returns 204 No Content.
+func (s *Server) handleOrchDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.browserAuthorized(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	found, err := s.orch.delete(r.PathValue("id"))
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such run"})
+		return
+	}
+	if errors.Is(err, errRunActive) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "run is still active; cannot delete"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to delete run"})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // orchRespondReq is the POST body delivering a user's intervention decision:
