@@ -120,6 +120,11 @@ func claudeSettingsPath() string {
 // the local monitor's loopback report listener. It preserves existing settings
 // and is idempotent: re-running replaces only our managed hook entries, which
 // are tagged with managedMarker so uninstall can remove exactly them.
+//
+// The injected command is a bare `report --event <e>`, which now self-collects
+// the PR link (via `gh pr view`) and configured MCP servers (read from
+// ~/.claude.json and any project .mcp.json) from the session's cwd — no extra
+// flags needed here.
 func installClaudeHook(binaryPath string) error {
 	path := claudeSettingsPath()
 	settings := map[string]any{}

@@ -512,6 +512,15 @@ func (s *Server) dispatchAgentFrame(sess *registry.Session, f protocol.Frame) {
 		sess.PublishOutput(f.Output)
 	case protocol.FrameProjects:
 		s.reg.SetProjects(sess.ID, f.Projects)
+	case protocol.FrameLocalSize:
+		// The agent reports its RAW local terminal size; fold it into the min
+		// negotiation and push back a FrameResize only if the negotiated min
+		// actually moved (idempotent when unchanged).
+		if f.Resize != nil {
+			if rows, cols, changed := sess.SetLocalSize(f.Resize.Rows, f.Resize.Cols); changed {
+				_ = sess.SendResize(rows, cols)
+			}
+		}
 	case protocol.FrameExit:
 		// Mark exited; the deferred Remove will clean up on socket close.
 		hb := sess.Latest

@@ -116,6 +116,18 @@
     return "state " + (s || "idle");
   }
 
+  // workspaceName returns the folder name (basename of the heartbeat cwd) to use
+  // as a session's primary label. The wrapped command is almost always "claude"
+  // and thus useless as a per-session index, so the working directory's leaf
+  // name (e.g. "slack-mcp-server") identifies the workspace instead. Returns ""
+  // when there is no cwd so callers can fall back to command/id.
+  function workspaceName(hb) {
+    const cwd = (hb && hb.cwd) || "";
+    if (!cwd) return "";
+    const parts = cwd.replace(/[/\\]+$/, "").split(/[/\\]/);
+    return parts[parts.length - 1] || "";
+  }
+
   function renderDevices(groups) {
     const list = el("device-list");
     list.innerHTML = "";
@@ -173,9 +185,14 @@
 
         const row1 = document.createElement("div");
         row1.className = "row1";
+        // Primary label: the workspace/folder name (basename of cwd) so each
+        // session is identifiable at a glance. The wrapped command is almost
+        // always "claude", so it makes a poor per-session index; fall back to it
+        // (then the session id) only when there is no cwd.
         const cmd = document.createElement("span");
         cmd.className = "cmd";
-        cmd.textContent = hb.command || s.id;
+        cmd.textContent = workspaceName(hb) || hb.command || s.id;
+        if (hb.cwd) cmd.title = hb.cwd;
         row1.appendChild(cmd);
         // Observed processes are discovered read-only; tag them so the user
         // knows there is no interactive terminal (unlike managed sessions).
@@ -186,17 +203,33 @@
           badge.textContent = "observed";
           row1.appendChild(badge);
         }
+        card.appendChild(row1);
+
+        // Row 2 sits directly under the workspace index and shows the session's
+        // current state as a colored pill. When the session is blocked on the
+        // user (waiting), append an explicit call-to-action so the card itself —
+        // not just the sidebar banner — prompts the operator to respond.
+        const row2 = document.createElement("div");
+        row2.className = "row2";
         const st = document.createElement("span");
         st.className = stateClass(s.state);
         st.textContent = s.state || "idle";
-        row1.appendChild(st);
-        card.appendChild(row1);
+        row2.appendChild(st);
+        if (waiting) {
+          const need = document.createElement("span");
+          need.className = "needs-input";
+          need.textContent = "⚠ needs your input";
+          row2.appendChild(need);
+        }
+        card.appendChild(row2);
 
         const meta = document.createElement("div");
         meta.className = "meta";
         const bits = [];
         if (hb.model) bits.push(hb.model);
         if (hb.branch) bits.push("⑂ " + hb.branch);
+        if (hb.pr_url) bits.push("PR #" + (hb.pr_number || ""));
+        if (hb.mcp_servers && hb.mcp_servers.length) bits.push("🔌 " + hb.mcp_servers.length);
         if (observed && s.pid) bits.push("pid " + s.pid);
         if (hb.device_pinned) bits.push("📌");
         if (hb.cwd) bits.push(hb.cwd);
@@ -232,7 +265,15 @@
     for (const g of groups || []) {
       for (const s of g.sessions || []) {
         if (s.state === "waiting") {
-          waiting.push({ id: s.id, device: g.device, hb: s.heartbeat || {} });
+          waiting.push({
+            id: s.id,
+            device: g.device,
+            hb: s.heartbeat || {},
+            // Retain enough of the session to route the toast's Open button:
+            // managed sessions attach a terminal, observed ones open the panel.
+            attachable: !!s.attachable,
+            session: s,
+          });
         }
       }
     }
@@ -249,18 +290,108 @@
       document.title = baseTitle;
     }
 
-    // Fire a browser Notification once per transition into waiting.
+    // Fire a browser Notification AND an in-page toast once per transition into
+    // waiting. The toast is the primary in-UI prompt (works even when OS
+    // Notifications are denied); notify() is a best-effort OS-level extra.
     const nowWaiting = new Set(waiting.map((w) => w.id));
     for (const w of waiting) {
       if (!alertedIDs.has(w.id)) {
         alertedIDs.add(w.id);
         notify(w);
+        showToast(w);
       }
     }
-    // Drop ids that are no longer waiting so a later re-entry alerts again.
+    // Drop ids that are no longer waiting so a later re-entry alerts again, and
+    // dismiss any lingering toast for a session that resolved on its own.
     for (const id of Array.from(alertedIDs)) {
-      if (!nowWaiting.has(id)) alertedIDs.delete(id);
+      if (!nowWaiting.has(id)) {
+        alertedIDs.delete(id);
+        dismissToast(id);
+      }
     }
+  }
+
+  // ---- In-page attention toasts --------------------------------------------
+
+  // showToast pops a small dismissable card into the bottom-right stack naming a
+  // newly-waiting session, with an Open button that jumps to it. It is keyed by
+  // session id so a session only ever has one toast; a re-entry replaces it.
+  function showToast(w) {
+    const stack = el("toast-stack");
+    if (!stack) return;
+    dismissToast(w.id); // replace any existing toast for this id
+
+    const label = workspaceName(w.hb) || (w.hb && w.hb.command) || w.id;
+
+    const toast = document.createElement("div");
+    toast.className = "toast";
+    toast.dataset.id = w.id;
+
+    const head = document.createElement("div");
+    head.className = "toast-head";
+    const icon = document.createElement("span");
+    icon.className = "toast-icon";
+    icon.textContent = "⚠";
+    const title = document.createElement("span");
+    title.className = "toast-title";
+    title.textContent = "Needs your input";
+    const close = document.createElement("button");
+    close.className = "toast-close";
+    close.type = "button";
+    close.title = "Dismiss";
+    close.textContent = "×";
+    close.addEventListener("click", (e) => { e.stopPropagation(); dismissToast(w.id); });
+    head.appendChild(icon);
+    head.appendChild(title);
+    head.appendChild(close);
+    toast.appendChild(head);
+
+    const body = document.createElement("div");
+    body.className = "toast-body";
+    body.textContent = label + " · " + w.device +
+      (w.hb && w.hb.branch ? " (⑂ " + w.hb.branch + ")" : "");
+    toast.appendChild(body);
+
+    const actions = document.createElement("div");
+    actions.className = "toast-actions";
+    const open = document.createElement("button");
+    open.className = "btn primary small";
+    open.type = "button";
+    open.textContent = "Open";
+    open.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openWaiting(w);
+      dismissToast(w.id);
+    });
+    actions.appendChild(open);
+    toast.appendChild(actions);
+
+    // Clicking the toast body also opens the session.
+    toast.addEventListener("click", () => { openWaiting(w); dismissToast(w.id); });
+
+    stack.appendChild(toast);
+  }
+
+  // openWaiting jumps to a waiting session: managed sessions attach a terminal,
+  // observed processes open their read-only detail panel.
+  function openWaiting(w) {
+    if (w.attachable) attach(w.id, w.hb);
+    else if (w.session) showObserved(w.session);
+  }
+
+  // dismissToast removes the toast for a given session id, if present.
+  function dismissToast(id) {
+    const stack = el("toast-stack");
+    if (!stack) return;
+    const t = stack.querySelector('.toast[data-id="' + cssEscape(id) + '"]');
+    if (t) t.remove();
+  }
+
+  // cssEscape is a tiny attribute-selector escaper for session ids that may
+  // contain characters (: / .) unsafe in a querySelector attribute value.
+  function cssEscape(s) {
+    if (window.CSS && CSS.escape) return CSS.escape(String(s));
+    return String(s).replace(/["\\]/g, "\\$&");
   }
 
   // notify raises a browser Notification for a newly-waiting session, lazily
@@ -338,6 +469,20 @@
     }
   }
 
+  // fitAndSend re-fits the terminal to its (now-visible) panel and reports the
+  // resulting size to the server. The double requestAnimationFrame defers the
+  // fit until after the browser has laid out the freshly-revealed terminal
+  // panel, so term.rows/cols reflect the full available space rather than a
+  // stale pre-layout (often too small) measurement. The server lets the browser
+  // drive the PTY size, so reporting the true panel size makes the dashboard
+  // terminal fill its area by default.
+  function fitAndSend() {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (fitAddon) fitAddon.fit();
+      sendResize();
+    }));
+  }
+
   function attach(id, hb) {
     if (id === activeSessionID) return;
     detach();
@@ -359,7 +504,7 @@
     termSocket = new WebSocket(url);
     termSocket.binaryType = "arraybuffer";
 
-    termSocket.onopen = () => { sendResize(); term.focus(); };
+    termSocket.onopen = () => { fitAndSend(); term.focus(); };
     termSocket.onmessage = (ev) => {
       if (ev.data instanceof ArrayBuffer) {
         term.write(decoder.decode(new Uint8Array(ev.data)));
@@ -412,9 +557,11 @@
     el("obs-session").textContent = hb.command || s.id;
     el("obs-meta").textContent = s.id;
 
+    const project = hb.cwd ? hb.cwd.replace(/\/+$/, "").split("/").pop() : "";
     const fields = [
       ["State", s.state || "idle"],
       ["PID", s.pid ? String(s.pid) : ""],
+      ["Project", project],
       ["Model", hb.model || ""],
       ["Branch", hb.branch || ""],
       ["Directory", hb.cwd || ""],
@@ -430,6 +577,35 @@
       dt.textContent = k;
       const dd = document.createElement("dd");
       dd.textContent = v;
+      dl.appendChild(dt);
+      dl.appendChild(dd);
+    }
+    // Pull Request needs a clickable anchor, not plain text.
+    if (hb.pr_url) {
+      const dt = document.createElement("dt");
+      dt.textContent = "Pull Request";
+      const dd = document.createElement("dd");
+      const a = document.createElement("a");
+      a.href = hb.pr_url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent =
+        "#" + (hb.pr_number || "") + (hb.pr_state ? " (" + hb.pr_state + ")" : "");
+      dd.appendChild(a);
+      dl.appendChild(dt);
+      dl.appendChild(dd);
+    }
+    // MCP servers render as small chips.
+    if (hb.mcp_servers && hb.mcp_servers.length) {
+      const dt = document.createElement("dt");
+      dt.textContent = "MCP servers";
+      const dd = document.createElement("dd");
+      for (const name of hb.mcp_servers) {
+        const chip = document.createElement("span");
+        chip.className = "mcp-chip";
+        chip.textContent = name;
+        dd.appendChild(chip);
+      }
       dl.appendChild(dt);
       dl.appendChild(dd);
     }

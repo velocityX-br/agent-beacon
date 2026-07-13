@@ -13,6 +13,7 @@ import (
 
 	"github.com/local/agent-beacon/internal/agent"
 	"github.com/local/agent-beacon/internal/config"
+	"github.com/local/agent-beacon/internal/monitor"
 	"github.com/local/agent-beacon/pkg/protocol"
 )
 
@@ -68,18 +69,26 @@ func sessionCmd() *cobra.Command {
 				projects = agent.DiscoverProjects(projectRoots)
 			}
 
-			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			// Do NOT trap os.Interrupt: with the wrapper's stdin in raw mode,
+			// Ctrl+C must flow through as a raw 0x03 byte to Claude's PTY rather
+			// than being turned into a SIGINT that tears down the wrapper. Only
+			// SIGTERM triggers a clean shutdown (the wrapper signals the child).
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 			defer stop()
 
 			code, err := agent.Run(ctx, agent.Options{
-				ServerURL: url,
-				Token:     tok,
-				SessionID: sessionID,
-				Device:    name,
-				Pinned:    pinned,
-				Command:   args,
-				Projects:  projects,
+				ServerURL:    url,
+				Token:        tok,
+				SessionID:    sessionID,
+				Device:       name,
+				Pinned:       pinned,
+				Command:      args,
+				Projects:     projects,
 				ProjectRoots: projectRoots,
+				// Poll the monitor's loopback report listener so a managed session
+				// picks up the Claude Notification hook's "waiting" signal (the
+				// same source observed sessions use) and can alert the operator.
+				ReportAddr: monitor.DefaultReportAddr,
 			})
 			if err != nil {
 				return err

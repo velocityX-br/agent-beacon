@@ -22,13 +22,13 @@ const maxScrollback = 256 * 1024
 // Session is the server-side view of one agent session (managed) or one
 // observed process (observed).
 type Session struct {
-	ID         string
-	Kind       protocol.SessionKind
-	Latest     protocol.Heartbeat
-	Projects   []protocol.Project
-	FirstSeen  time.Time
-	LastSeen   time.Time
-	send       Sender
+	ID        string
+	Kind      protocol.SessionKind
+	Latest    protocol.Heartbeat
+	Projects  []protocol.Project
+	FirstSeen time.Time
+	LastSeen  time.Time
+	send      Sender
 	// connID identifies the owning monitor WebSocket for observed sessions, so
 	// a disconnect can drop exactly the observed cards that connection reported.
 	// Empty for managed sessions.
@@ -43,9 +43,13 @@ type Session struct {
 	scrollback []byte
 	// termSizes records each attached browser's requested PTY size, keyed by the
 	// same subscriber id used for fan-out. The effective PTY size is the
-	// element-wise minimum across all non-zero entries. Local iTerm2 is
-	// deliberately excluded from this negotiation.
+	// element-wise minimum across all non-zero entries.
 	termSizes map[int]protocol.ResizeMsg
+	// localSize is the RAW size the local terminal (iTerm2) reported via
+	// FrameLocalSize. It caps the PTY ONLY when no browser is attached; once any
+	// browser subscribes, the browser(s) drive the negotiated size and localSize
+	// is excluded so a small iTerm2 window cannot shrink the dashboard terminal.
+	localSize protocol.ResizeMsg
 	// curSize is the last size actually pushed to the agent.
 	curSize protocol.ResizeMsg
 }
@@ -220,8 +224,8 @@ func (r *Registry) Get(id string) (*Session, bool) {
 
 // DeviceGroup is a set of sessions sharing a device name, for the dashboard.
 type DeviceGroup struct {
-	Device   string            `json:"device"`
-	Sessions []SessionView     `json:"sessions"`
+	Device   string             `json:"device"`
+	Sessions []SessionView      `json:"sessions"`
 	Projects []protocol.Project `json:"projects,omitempty"`
 }
 
@@ -384,14 +388,32 @@ func (s *Session) SetSubscriberSize(subID int, rows, cols uint16) (nrows, ncols 
 	return s.recomputeSizeLocked()
 }
 
-// recomputeSizeLocked computes the element-wise minimum size across all
-// non-zero browser entries and updates curSize if it changed. Callers must hold
-// s.mu. When no browsers report a size, curSize is left unchanged.
+// SetLocalSize records the RAW size reported by the local terminal (iTerm2) and
+// recomputes the negotiated (minimum) size across all clients. It mirrors
+// SetSubscriberSize: the caller should SendResize when changed.
+func (s *Session) SetLocalSize(rows, cols uint16) (nrows, ncols uint16, changed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.localSize = protocol.ResizeMsg{Rows: rows, Cols: cols}
+	return s.recomputeSizeLocked()
+}
+
+// recomputeSizeLocked computes the negotiated PTY size and updates curSize if it
+// changed. Callers must hold s.mu. When no client reports a usable size, curSize
+// is left unchanged.
+//
+// The browser drives the size whenever any browser terminal is attached: the
+// negotiated size is the element-wise minimum across the attached browsers only,
+// and the local terminal (iTerm2) size is intentionally EXCLUDED. This lets the
+// dashboard fill its panel regardless of how large or small the local iTerm2
+// window is (a small iTerm2 no longer caps the browser). The local terminal is
+// folded in only when no browser is attached, so a purely local managed session
+// still matches the physical terminal.
 func (s *Session) recomputeSizeLocked() (rows, cols uint16, changed bool) {
 	var minRows, minCols uint16
-	for _, sz := range s.termSizes {
+	fold := func(sz protocol.ResizeMsg) {
 		if sz.Rows == 0 || sz.Cols == 0 {
-			continue
+			return
 		}
 		if minRows == 0 || sz.Rows < minRows {
 			minRows = sz.Rows
@@ -400,8 +422,16 @@ func (s *Session) recomputeSizeLocked() (rows, cols uint16, changed bool) {
 			minCols = sz.Cols
 		}
 	}
+	for _, sz := range s.termSizes {
+		fold(sz)
+	}
+	// Only let the local terminal cap the PTY when no browser is attached; a
+	// browser attach hands sizing authority to the browser(s).
+	if len(s.termSizes) == 0 {
+		fold(s.localSize)
+	}
 	if minRows == 0 || minCols == 0 {
-		// No browser is reporting a usable size; keep the PTY as-is.
+		// No client is reporting a usable size; keep the PTY as-is.
 		return s.curSize.Rows, s.curSize.Cols, false
 	}
 	if minRows == s.curSize.Rows && minCols == s.curSize.Cols {

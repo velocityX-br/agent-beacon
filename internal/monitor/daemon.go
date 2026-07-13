@@ -217,6 +217,18 @@ func sendSnapshot(send func(protocol.Frame) error, opts Options, store *enrichSt
 			if e.Task != "" {
 				hb.Task = e.Task
 			}
+			if e.PRURL != "" {
+				hb.PRURL = e.PRURL
+			}
+			if e.PRState != "" {
+				hb.PRState = e.PRState
+			}
+			if e.PRNumber != 0 {
+				hb.PRNumber = e.PRNumber
+			}
+			if len(e.MCPServers) > 0 {
+				hb.MCPServers = e.MCPServers
+			}
 			// State precedence: a Stop event (idle) is terminal for the tick; a
 			// Notification event (Claude blocked on the user) raises the
 			// intervention "waiting" state; otherwise honour any explicit state.

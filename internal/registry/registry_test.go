@@ -109,3 +109,35 @@ func TestUnsubscribeRecomputesSize(t *testing.T) {
 		t.Fatalf("resize after detach = (%d,%d), want (40,100)", last.Rows, last.Cols)
 	}
 }
+
+// TestBrowserDrivesSizeExcludingLocal verifies the local terminal (iTerm2) size
+// is EXCLUDED from negotiation whenever a browser is attached — the browser
+// drives the PTY size — and is used only when no browser is attached. This is
+// what lets the dashboard fill its panel even when the local iTerm2 window is
+// small.
+func TestBrowserDrivesSizeExcludingLocal(t *testing.T) {
+	s := newTestSession()
+
+	// A browser attaches at 40x100.
+	if rows, cols, changed := s.SetSubscriberSize(1, 40, 100); !changed || rows != 40 || cols != 100 {
+		t.Fatalf("browser size = (%d,%d,%v), want (40,100,true)", rows, cols, changed)
+	}
+
+	// A larger local size is ignored while a browser is attached (browser drives).
+	if rows, cols, changed := s.SetLocalSize(50, 120); changed || rows != 40 || cols != 100 {
+		t.Fatalf("larger local = (%d,%d,%v), want (40,100,false)", rows, cols, changed)
+	}
+
+	// A SMALLER local size must ALSO be ignored now: a small iTerm2 no longer
+	// caps the browser terminal (this is the behavior change).
+	if rows, cols, changed := s.SetLocalSize(30, 80); changed || rows != 40 || cols != 100 {
+		t.Fatalf("smaller local = (%d,%d,%v), want (40,100,false) — local must not cap the browser", rows, cols, changed)
+	}
+
+	// Local-only case: with no browsers, the local size IS the negotiated size,
+	// so a purely local managed session still matches the physical terminal.
+	s2 := newTestSession()
+	if rows, cols, changed := s2.SetLocalSize(45, 110); !changed || rows != 45 || cols != 110 {
+		t.Fatalf("local-only = (%d,%d,%v), want (45,110,true)", rows, cols, changed)
+	}
+}

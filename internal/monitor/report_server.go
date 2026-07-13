@@ -21,14 +21,18 @@ const DefaultReportAddr = "127.0.0.1:47615"
 // /report. All fields are optional except that at least one correlation key
 // (Pid or CWD) must be present to attach the enrichment to a scanned process.
 type reportBody struct {
-	Pid        int     `json:"pid,omitempty"`
-	CWD        string  `json:"cwd,omitempty"`
-	SessionID  string  `json:"session_id,omitempty"`
-	Model      string  `json:"model,omitempty"`
-	ContextPct float64 `json:"context_pct,omitempty"`
-	Task       string  `json:"task,omitempty"`
-	State      string  `json:"state,omitempty"`
-	Event      string  `json:"event,omitempty"` // SessionStart | Stop | heartbeat | Notification
+	Pid        int      `json:"pid,omitempty"`
+	CWD        string   `json:"cwd,omitempty"`
+	SessionID  string   `json:"session_id,omitempty"`
+	Model      string   `json:"model,omitempty"`
+	ContextPct float64  `json:"context_pct,omitempty"`
+	Task       string   `json:"task,omitempty"`
+	State      string   `json:"state,omitempty"`
+	Event      string   `json:"event,omitempty"` // SessionStart | Stop | heartbeat | Notification
+	PRNumber   int      `json:"pr_number,omitempty"`
+	PRState    string   `json:"pr_state,omitempty"`
+	PRURL      string   `json:"pr_url,omitempty"`
+	MCPServers []string `json:"mcp_servers,omitempty"`
 }
 
 // enrichment is hook-provided metadata merged onto a scanned process.
@@ -38,6 +42,10 @@ type enrichment struct {
 	Task       string
 	State      string
 	SessionID  string
+	PRNumber   int
+	PRState    string
+	PRURL      string
+	MCPServers []string
 	Stopping   bool // event == Stop: reflect idle/exited promptly
 	Waiting    bool // event == Notification: Claude is blocked on the user
 	expires    time.Time
@@ -71,6 +79,10 @@ func (s *enrichStore) put(b reportBody) {
 		Task:       b.Task,
 		State:      b.State,
 		SessionID:  b.SessionID,
+		PRNumber:   b.PRNumber,
+		PRState:    b.PRState,
+		PRURL:      b.PRURL,
+		MCPServers: b.MCPServers,
 		Stopping:   b.Event == "Stop",
 		Waiting:    b.Event == "Notification",
 		expires:    time.Now().Add(s.ttl),
@@ -129,6 +141,7 @@ func newReportServer(store *enrichStore, token string, log *slog.Logger) http.Ha
 	rs := &reportServer{store: store, token: token, log: log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /report", rs.handleReport)
+	mux.HandleFunc("GET /state", rs.handleState)
 	return mux
 }
 
@@ -157,6 +170,42 @@ func (rs *reportServer) handleReport(w http.ResponseWriter, r *http.Request) {
 	}
 	rs.store.put(b)
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// stateResponse is the JSON /state returns so a managed session (which sends its
+// own WS heartbeat and bypasses the scan-based enrichment merge) can learn the
+// hook-driven waiting/idle signal for its own cwd/pid. Empty when no enrichment
+// exists (the caller then keeps its default running state).
+type stateResponse struct {
+	State    string `json:"state,omitempty"` // hook-reported explicit state, if any
+	Waiting  bool   `json:"waiting"`         // Notification hook: blocked on the user
+	Stopping bool   `json:"stopping"`        // Stop hook: session went idle
+}
+
+// handleState answers a managed agent's poll for its own hook-driven state,
+// keyed by pid and/or cwd query params. It mirrors the enrichStore lookup the
+// daemon does for observed processes so a managed session gets the same
+// Notification-driven "waiting" alert. Loopback + token guarded like /report.
+func (rs *reportServer) handleState(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if rs.token != "" {
+		got := r.Header.Get("X-Agent-Beacon-Token")
+		if subtle.ConstantTimeCompare([]byte(got), []byte(rs.token)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+	pid, _ := strconv.Atoi(r.URL.Query().Get("pid"))
+	cwd := r.URL.Query().Get("cwd")
+	var resp stateResponse
+	if e, ok := rs.store.lookup(pid, cwd); ok {
+		resp = stateResponse{State: e.State, Waiting: e.Waiting, Stopping: e.Stopping}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // isLoopbackRequest reports whether the request originated from the loopback

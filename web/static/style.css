@@ -211,6 +211,11 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .state.exited  { background: rgba(248,81,73,.15); color: var(--err); }
 .state.stale   { background: rgba(110,118,129,.15); color: var(--stale); }
 
+/* Row under the workspace-name index carrying the current state pill and, when
+   the session is blocked on the user, an explicit "needs your input" prompt. */
+.session-card .row2 { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.needs-input { font-size: 11px; font-weight: 600; color: var(--warn); }
+
 /* Stage */
 .stage { flex: 1; display: flex; min-width: 0; min-height: 0; }
 .empty-stage { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--fg-muted); }
@@ -249,6 +254,16 @@ body { display: flex; flex-direction: column; height: 100vh; }
 }
 .obs-fields dt { color: var(--fg-muted); font-size: 12px; text-transform: uppercase; letter-spacing: .5px; }
 .obs-fields dd { margin: 0; font-size: 14px; word-break: break-all; }
+.obs-fields a { color: var(--accent); }
+.mcp-chip {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 6px;
+  margin: 0 4px 4px 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--fg-muted);
+}
 
 /* Spawn modal */
 .modal {
@@ -442,3 +457,48 @@ body { display: flex; flex-direction: column; height: 100vh; }
   overflow-x: auto;
   white-space: pre;
 }
+
+/* In-page attention toasts: a fixed bottom-right stack of small cards that pop
+   up when a session needs the user (waiting). Independent of OS Notifications. */
+.toast-stack {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 320px;
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  background: var(--bg-panel);
+  border: 1px solid var(--warn);
+  border-left: 3px solid var(--warn);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.45);
+  cursor: pointer;
+  animation: toast-in .18s ease-out;
+}
+.toast:hover { border-color: var(--warn); background: rgba(210,153,34,.08); }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.toast-head { display: flex; align-items: center; gap: 6px; }
+.toast-icon { color: var(--warn); font-size: 14px; }
+.toast-title { color: var(--warn); font-weight: 600; font-size: 13px; flex: 1; }
+.toast-close {
+  background: none;
+  border: none;
+  color: var(--fg-muted, #8b97a7);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.toast-close:hover { color: #fff; }
+.toast-body { font-size: 12px; margin: 6px 0 8px; overflow-wrap: anywhere; }
+.toast-actions { display: flex; justify-content: flex-end; }

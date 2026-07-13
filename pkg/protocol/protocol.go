@@ -30,6 +30,13 @@ const (
 	// claude processes currently observed on the device. The server diffs each
 	// snapshot against the previous one to add/remove observed sessions.
 	FrameObserved FrameType = "observed"
+	// FrameLocalSize is sent agent->server reporting the RAW local terminal
+	// (iTerm2) size so the server can fold it into the element-wise min size
+	// negotiation alongside attached browsers. It reuses the Resize payload.
+	// This is distinct from FrameResize (server->agent "apply this to your PTY")
+	// to keep the invariant "raw local size in, negotiated min out" and avoid a
+	// resize feedback loop.
+	FrameLocalSize FrameType = "local_size"
 )
 
 // SessionKind distinguishes a passively observed process (read-only, no PTY)
@@ -64,15 +71,15 @@ func ObservedID(device string, pid int) string {
 // Frame is the envelope for every WebSocket message in either direction.
 // Exactly one of the payload pointers is non-nil, matching Type.
 type Frame struct {
-	Type      FrameType    `json:"type"`
-	SessionID string       `json:"session_id,omitempty"`
-	Heartbeat *Heartbeat   `json:"heartbeat,omitempty"`
-	Output    []byte       `json:"output,omitempty"`
-	Input     []byte       `json:"input,omitempty"`
-	Resize    *ResizeMsg   `json:"resize,omitempty"`
-	Spawn     *SpawnMsg    `json:"spawn,omitempty"`
-	Projects  []Project    `json:"projects,omitempty"`
-	Exit      *ExitMsg     `json:"exit,omitempty"`
+	Type      FrameType  `json:"type"`
+	SessionID string     `json:"session_id,omitempty"`
+	Heartbeat *Heartbeat `json:"heartbeat,omitempty"`
+	Output    []byte     `json:"output,omitempty"`
+	Input     []byte     `json:"input,omitempty"`
+	Resize    *ResizeMsg `json:"resize,omitempty"`
+	Spawn     *SpawnMsg  `json:"spawn,omitempty"`
+	Projects  []Project  `json:"projects,omitempty"`
+	Exit      *ExitMsg   `json:"exit,omitempty"`
 	// Observed is the full set of observed processes in a FrameObserved snapshot.
 	// Each element carries Kind == KindObserved and a Pid.
 	Observed []Heartbeat `json:"observed,omitempty"`
@@ -94,20 +101,22 @@ const (
 // Heartbeat carries the metadata a session reports on each tick. Fields mirror
 // the documented ai-beacon heartbeat surface but the struct is our own.
 type Heartbeat struct {
-	Device      string       `json:"device"`
-	Command     string       `json:"command"`      // the wrapped command line, e.g. "claude"
-	Model       string       `json:"model,omitempty"`
-	Tokens      int          `json:"tokens,omitempty"`
-	ContextPct  float64      `json:"context_pct,omitempty"`
-	State       SessionState `json:"state"`
-	Task        string       `json:"task,omitempty"`   // short description of current work
-	Branch      string       `json:"branch,omitempty"`
-	CWD         string       `json:"cwd,omitempty"`
-	GitHubOwner string       `json:"github_owner,omitempty"`
-	GitHubRepo  string       `json:"github_repo,omitempty"`
-	PRNumber    int          `json:"pr_number,omitempty"`
-	PRState     string       `json:"pr_state,omitempty"`
-	DevicePinned bool        `json:"device_pinned,omitempty"` // name came from flag/env -> immune to rename
+	Device       string       `json:"device"`
+	Command      string       `json:"command"` // the wrapped command line, e.g. "claude"
+	Model        string       `json:"model,omitempty"`
+	Tokens       int          `json:"tokens,omitempty"`
+	ContextPct   float64      `json:"context_pct,omitempty"`
+	State        SessionState `json:"state"`
+	Task         string       `json:"task,omitempty"` // short description of current work
+	Branch       string       `json:"branch,omitempty"`
+	CWD          string       `json:"cwd,omitempty"`
+	GitHubOwner  string       `json:"github_owner,omitempty"`
+	GitHubRepo   string       `json:"github_repo,omitempty"`
+	PRNumber     int          `json:"pr_number,omitempty"`
+	PRState      string       `json:"pr_state,omitempty"`
+	PRURL        string       `json:"pr_url,omitempty"`        // direct link to the PR, if any
+	MCPServers   []string     `json:"mcp_servers,omitempty"`   // names of connected MCP servers
+	DevicePinned bool         `json:"device_pinned,omitempty"` // name came from flag/env -> immune to rename
 	// Kind marks observed (read-only) vs managed (interactive) sessions. Empty is
 	// treated as KindManaged for backward compatibility with wrap agents.
 	Kind SessionKind `json:"kind,omitempty"`
@@ -128,7 +137,7 @@ type ResizeMsg struct {
 // SpawnMsg is a dashboard-originated request to start a new session on the agent.
 type SpawnMsg struct {
 	ProjectPath      string `json:"project_path"`
-	Command          string `json:"command"`           // e.g. "claude"; empty -> agent default
+	Command          string `json:"command"` // e.g. "claude"; empty -> agent default
 	WorktreeBranch   string `json:"worktree_branch,omitempty"`
 	WorktreeLocation string `json:"worktree_location,omitempty"` // "sibling" | "subdirectory"
 }

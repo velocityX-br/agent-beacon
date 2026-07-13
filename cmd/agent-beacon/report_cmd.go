@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -32,6 +35,9 @@ func reportCmd() *cobra.Command {
 		task       string
 		state      string
 		event      string
+		prURL      string
+		prState    string
+		mcpServers []string
 	)
 	cmd := &cobra.Command{
 		Use:   "report",
@@ -84,6 +90,32 @@ func reportCmd() *cobra.Command {
 				body["event"] = event
 			}
 
+			// PR + MCP self-collection: gather best-effort context from the cwd
+			// when the caller did not pass explicit values. Both swallow all
+			// errors so a hook never blocks or fails a Claude session (matches
+			// the "monitor unreachable is fine" philosophy below). PR uses a
+			// short-timeout `gh` call; MCP reads config files directly. A missing
+			// gh binary, no-PR repo, or absent config simply omits the fields.
+			prNumber := 0
+			if prURL == "" && prState == "" {
+				prNumber, prState, prURL = collectPR(cwd)
+			}
+			if len(mcpServers) == 0 {
+				mcpServers = collectMCPServers(cwd)
+			}
+			if prURL != "" {
+				body["pr_url"] = prURL
+			}
+			if prState != "" {
+				body["pr_state"] = prState
+			}
+			if prNumber != 0 {
+				body["pr_number"] = prNumber
+			}
+			if len(mcpServers) > 0 {
+				body["mcp_servers"] = mcpServers
+			}
+
 			data, err := json.Marshal(body)
 			if err != nil {
 				return err
@@ -121,5 +153,112 @@ func reportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&task, "task", "", "current task description")
 	cmd.Flags().StringVar(&state, "state", "", "session state (running|idle|...)")
 	cmd.Flags().StringVar(&event, "event", "", "hook event (SessionStart|Stop|heartbeat|Notification)")
+	cmd.Flags().StringVar(&prURL, "pr-url", "", "pull request URL (default: self-collect via `gh pr view`)")
+	cmd.Flags().StringVar(&prState, "pr-state", "", "pull request state (default: self-collect via `gh pr view`)")
+	cmd.Flags().StringArrayVar(&mcpServers, "mcp", nil, "connected MCP server name (repeatable; default: read from ~/.claude.json and .mcp.json)")
 	return cmd
+}
+
+// collectPR runs `gh pr view --json number,state,url` in dir and parses the
+// result. Best-effort: any error (gh absent, not a repo, no PR) yields zeroes.
+func collectPR(dir string) (number int, state, url string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view", "--json", "number,state,url")
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, "", ""
+	}
+	var pr struct {
+		Number int    `json:"number"`
+		State  string `json:"state"`
+		URL    string `json:"url"`
+	}
+	if err := json.Unmarshal(out, &pr); err != nil {
+		return 0, "", ""
+	}
+	return pr.Number, pr.State, pr.URL
+}
+
+// collectMCPServers returns the names of MCP servers configured for the session
+// running in dir. It reads Claude's config files directly rather than shelling
+// out to `claude mcp list` (which health-checks every server and can block for
+// several seconds). Best-effort: missing or malformed files yield nil so a hook
+// never blocks or fails a session.
+//
+// Three configuration scopes are merged (de-duplicated):
+//   - global user servers:  ~/.claude.json  ->  mcpServers
+//   - project-scoped servers: ~/.claude.json -> projects[<dir>].mcpServers
+//   - shared project servers: <dir>/.mcp.json -> mcpServers
+func collectMCPServers(dir string) []string {
+	var claudeJSON []byte
+	if home, err := os.UserHomeDir(); err == nil {
+		claudeJSON, _ = os.ReadFile(filepath.Join(home, ".claude.json"))
+	}
+	var projectMCP []byte
+	if dir != "" {
+		projectMCP, _ = os.ReadFile(filepath.Join(dir, ".mcp.json"))
+	}
+	return mcpServersFromConfig(claudeJSON, projectMCP, dir)
+}
+
+// mcpServersFromConfig extracts the merged, de-duplicated set of MCP server
+// names from the raw config bytes. Split out from collectMCPServers so the
+// parsing is unit-testable. Order: global user servers, then project-scoped
+// servers from ~/.claude.json, then shared servers from the project .mcp.json.
+func mcpServersFromConfig(claudeJSON, projectMCPJSON []byte, dir string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(names []string) {
+		for _, n := range names {
+			if n != "" && !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
+	}
+
+	if len(claudeJSON) > 0 {
+		var cfg struct {
+			MCPServers map[string]json.RawMessage `json:"mcpServers"`
+			Projects   map[string]struct {
+				MCPServers map[string]json.RawMessage `json:"mcpServers"`
+			} `json:"projects"`
+		}
+		if json.Unmarshal(claudeJSON, &cfg) == nil {
+			add(sortedKeys(cfg.MCPServers))
+			if dir != "" {
+				if p, ok := cfg.Projects[dir]; ok {
+					add(sortedKeys(p.MCPServers))
+				}
+			}
+		}
+	}
+
+	if len(projectMCPJSON) > 0 {
+		var pm struct {
+			MCPServers map[string]json.RawMessage `json:"mcpServers"`
+		}
+		if json.Unmarshal(projectMCPJSON, &pm) == nil {
+			add(sortedKeys(pm.MCPServers))
+		}
+	}
+	return out
+}
+
+// sortedKeys returns the map keys in stable sorted order so the reported server
+// list is deterministic across runs.
+func sortedKeys(m map[string]json.RawMessage) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

@@ -147,6 +147,12 @@
     </section>
   </main>
 
+  <!-- In-page attention toasts: a floating stack (bottom-right) that pops up
+       when a session transitions into the "waiting" state, independent of the
+       OS-level browser Notification (which users often disable). Each toast
+       names the waiting session and offers a button to jump straight to it. -->
+  <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+
   <!-- Spawn dialog -->
   <div id="spawn-modal" class="modal" hidden>
     <div class="modal-card">
