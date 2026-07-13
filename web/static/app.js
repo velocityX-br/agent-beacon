@@ -175,6 +175,9 @@
       for (const s of g.sessions) {
         const hb = s.heartbeat || {};
         const observed = s.kind === "observed" || s.attachable === false;
+        // Observed (read-only, scan-discovered) sessions are hidden from the
+        // dashboard: only interactive managed sessions are shown.
+        if (observed) continue;
         const waiting = s.state === "waiting";
         const card = document.createElement("div");
         card.className = "session-card"
@@ -264,6 +267,9 @@
     const waiting = [];
     for (const g of groups || []) {
       for (const s of g.sessions || []) {
+        // Observed sessions are hidden from the dashboard, so they must not
+        // raise attention banners/toasts either.
+        if (s.kind === "observed" || s.attachable === false) continue;
         if (s.state === "waiting") {
           waiting.push({
             id: s.id,
