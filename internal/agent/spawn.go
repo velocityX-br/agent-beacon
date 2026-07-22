@@ -53,7 +53,13 @@ func handleSpawn(ctx context.Context, cfg spawnConfig, msg *protocol.SpawnMsg) e
 	if msg == nil {
 		return fmt.Errorf("spawn: empty message")
 	}
-	target, err := resolveSpawnTarget(cfg.roots, msg.ProjectPath)
+	var target string
+	var err error
+	if msg.TrustedCwd {
+		target, err = resolveTrustedCwd(msg.ProjectPath)
+	} else {
+		target, err = resolveSpawnTarget(cfg.roots, msg.ProjectPath)
+	}
 	if err != nil {
 		return err
 	}
@@ -87,7 +93,7 @@ func handleSpawn(ctx context.Context, cfg spawnConfig, msg *protocol.SpawnMsg) e
 
 	child := exec.Command(self, args...)
 	child.Dir = workdir
-	child.Env = append(os.Environ(),
+	child.Env = append(cleanClaudeEnv(os.Environ()),
 		"AGENT_BEACON_URL="+cfg.serverURL,
 		"AGENT_BEACON_AUTH_TOKEN="+cfg.token,
 	)
@@ -102,6 +108,32 @@ func handleSpawn(ctx context.Context, cfg spawnConfig, msg *protocol.SpawnMsg) e
 	// Release the child so it is not reaped as our own; it lives on its own.
 	go func() { _ = child.Wait() }()
 	return nil
+}
+
+// cleanClaudeEnv strips Claude Code's nested-session guard variables from an
+// inherited environment. When the beacon itself runs inside a Claude Code
+// session, CLAUDECODE (and friends) leak through os.Environ() into any spawned
+// `claude` child, which then refuses to start ("cannot be launched inside
+// another Claude Code session"). Dropping these makes the spawned/cloned
+// session a clean top-level session regardless of where the beacon was started.
+func cleanClaudeEnv(env []string) []string {
+	drop := map[string]bool{
+		"CLAUDECODE":             true,
+		"CLAUDE_CODE_ENTRYPOINT": true,
+		"CLAUDE_CODE_SSE_PORT":   true,
+	}
+	out := env[:0:0] // fresh slice, do not mutate caller's backing array
+	for _, kv := range env {
+		key := kv
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			key = kv[:i]
+		}
+		if drop[key] || strings.HasPrefix(key, "CLAUDE_CODE_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // CreateWorktree is an exported wrapper around createWorktree so other packages
@@ -153,6 +185,24 @@ func resolveSpawnTarget(roots []string, projectPath string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("spawn: project_path escapes allowed roots")
+}
+
+// resolveTrustedCwd validates a server-authoritative cwd for a clone. Trusted
+// (a process already runs there) so it need not pass the roots allowlist; we
+// still symlink-resolve and Stat it so a vanished/bad path fails cleanly.
+func resolveTrustedCwd(cwd string) (string, error) {
+	if cwd == "" {
+		return "", fmt.Errorf("spawn: trusted cwd empty")
+	}
+	real, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return "", fmt.Errorf("spawn: bad trusted cwd: %w", err)
+	}
+	info, err := os.Stat(real)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("spawn: trusted cwd is not a directory")
+	}
+	return real, nil
 }
 
 // createWorktree runs `git worktree add` for branch off the target repo. The

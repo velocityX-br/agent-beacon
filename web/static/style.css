@@ -70,6 +70,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
 .btn.ghost { background: transparent; }
 .btn.small { padding: 3px 8px; font-size: 13px; }
+.card-actions { display: flex; gap: 6px; margin-top: 6px; }
 
 /* Login */
 .login { flex: 1; display: flex; align-items: center; justify-content: center; }

@@ -222,6 +222,13 @@ func (r *Registry) Get(id string) (*Session, bool) {
 	return s, ok
 }
 
+// CloneTarget returns the cwd and device of a session, read under its lock.
+func (s *Session) CloneTarget() (cwd, device string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Latest.CWD, s.Latest.Device
+}
+
 // DeviceGroup is a set of sessions sharing a device name, for the dashboard.
 type DeviceGroup struct {
 	Device   string             `json:"device"`

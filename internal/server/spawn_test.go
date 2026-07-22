@@ -87,3 +87,96 @@ func TestSpawnRequiresAuth(t *testing.T) {
 		t.Fatalf("unauth spawn status = %d, want 401", resp.StatusCode)
 	}
 }
+
+// TestCloneRoutesTrustedCwd verifies POST /api/v1/sessions/{id}/clone derives
+// the target cwd from the source session's heartbeat and delivers a spawn frame
+// with that cwd and TrustedCwd=true.
+func TestCloneRoutesTrustedCwd(t *testing.T) {
+	s := New(Config{AgentToken: "psk", AuthProvider: string(auth.ModeNone), HeartbeatTTL: time.Minute}, nil)
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	got := make(chan protocol.Frame, 1)
+	sess := s.reg.Register("sess-x", func(f protocol.Frame) error {
+		got <- f
+		return nil
+	})
+	s.reg.Heartbeat(sess.ID, protocol.Heartbeat{Device: "box1", CWD: "/tmp/repo", State: protocol.StateRunning})
+
+	resp, err := http.Post(ts.URL+"/api/v1/sessions/"+sess.ID+"/clone", "application/json", bytes.NewBufferString("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("clone status = %d, want 202", resp.StatusCode)
+	}
+
+	select {
+	case f := <-got:
+		if f.Type != protocol.FrameSpawn {
+			t.Fatalf("frame type = %q, want spawn", f.Type)
+		}
+		if f.Spawn == nil || f.Spawn.ProjectPath != "/tmp/repo" || !f.Spawn.TrustedCwd {
+			t.Fatalf("spawn payload = %+v, want project /tmp/repo trusted_cwd=true", f.Spawn)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no spawn frame delivered to agent")
+	}
+}
+
+// TestCloneUnknownSession returns 404 when the source session id is unknown.
+func TestCloneUnknownSession(t *testing.T) {
+	s := New(Config{AgentToken: "psk", AuthProvider: string(auth.ModeNone), HeartbeatTTL: time.Minute}, nil)
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Post(ts.URL+"/api/v1/sessions/ghost/clone", "application/json", bytes.NewBufferString("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("clone status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// TestCloneNoCwd returns 400 when the source session has no cwd to clone.
+func TestCloneNoCwd(t *testing.T) {
+	s := New(Config{AgentToken: "psk", AuthProvider: string(auth.ModeNone), HeartbeatTTL: time.Minute}, nil)
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	sess := s.reg.Register("sess-nocwd", func(protocol.Frame) error { return nil })
+	s.reg.Heartbeat(sess.ID, protocol.Heartbeat{Device: "box1", State: protocol.StateRunning})
+
+	resp, err := http.Post(ts.URL+"/api/v1/sessions/"+sess.ID+"/clone", "application/json", bytes.NewBufferString("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("clone status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestCloneRequiresAuth ensures the clone endpoint is gated by browser auth.
+func TestCloneRequiresAuth(t *testing.T) {
+	hash, err := auth.HashPassword("pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := newAuthServer(t, Config{
+		AgentToken:   "psk",
+		AuthProvider: string(auth.ModePassword),
+		Password:     auth.NewPasswordChecker(hash),
+	})
+	resp, err := http.Post(ts.URL+"/api/v1/sessions/whatever/clone", "application/json", bytes.NewBufferString("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauth clone status = %d, want 401", resp.StatusCode)
+	}
+}

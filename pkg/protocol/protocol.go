@@ -140,6 +140,10 @@ type SpawnMsg struct {
 	Command          string `json:"command"` // e.g. "claude"; empty -> agent default
 	WorktreeBranch   string `json:"worktree_branch,omitempty"`
 	WorktreeLocation string `json:"worktree_location,omitempty"` // "sibling" | "subdirectory"
+	// TrustedCwd marks ProjectPath as server-authoritative (derived from a live
+	// session's heartbeat cwd) so the agent skips the roots allowlist. Set ONLY by
+	// the clone endpoint; browser-supplied paths always arrive TrustedCwd=false.
+	TrustedCwd bool `json:"trusted_cwd,omitempty"`
 }
 
 // Project is a spawnable repository discovered under a projects root.

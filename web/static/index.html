@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <title>agent-beacon</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" />
   <link rel="stylesheet" href="/style.css" />
@@ -160,6 +161,8 @@
       <p class="muted">on <strong id="spawn-device"></strong></p>
       <label>Project</label>
       <select id="spawn-project"></select>
+      <label>Or custom absolute path <span class="muted">(must be under a server-allowed root)</span></label>
+      <input id="spawn-path" type="text" placeholder="/absolute/path/to/repo" />
       <label>Command <span class="muted">(default: claude)</span></label>
       <input id="spawn-command" type="text" placeholder="claude" />
       <label>Git worktree branch <span class="muted">(optional)</span></label>

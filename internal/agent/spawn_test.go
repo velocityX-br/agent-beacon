@@ -44,6 +44,31 @@ func TestResolveSpawnTargetNoRoots(t *testing.T) {
 	}
 }
 
+// TestResolveTrustedCwdAccepts confirms a real dir passes with no roots (a
+// clone's cwd is server-authoritative, so it need not be under any root).
+func TestResolveTrustedCwdAccepts(t *testing.T) {
+	dir := t.TempDir()
+	got, err := resolveTrustedCwd(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	real, _ := filepath.EvalSymlinks(dir)
+	if got != real {
+		t.Fatalf("resolved %q, want %q", got, real)
+	}
+}
+
+// TestResolveTrustedCwdRejectsMissing confirms a vanished/bad path fails.
+func TestResolveTrustedCwdRejectsMissing(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := resolveTrustedCwd(filepath.Join(dir, "nope")); err == nil {
+		t.Fatal("expected rejection for nonexistent trusted cwd")
+	}
+	if _, err := resolveTrustedCwd(""); err == nil {
+		t.Fatal("expected rejection for empty trusted cwd")
+	}
+}
+
 func TestSanitizeBranch(t *testing.T) {
 	cases := map[string]bool{
 		"feature/foo":  true,

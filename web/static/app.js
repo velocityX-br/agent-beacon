@@ -18,6 +18,10 @@
   let fitAddon = null;
   let termSocket = null;
   let decoder = new TextDecoder();
+  // On (re)attach we pin the terminal viewport to the newest output so a long
+  // backlog doesn't leave the user scrolled up in history. We stay pinned only
+  // until the user manually scrolls up, then respect their position.
+  let stickToBottom = true;
 
   // ---- Intervention alerts --------------------------------------------------
   // Sessions in the "waiting" state have signalled (via Claude's Notification
@@ -238,6 +242,25 @@
         if (hb.cwd) bits.push(hb.cwd);
         meta.textContent = bits.join("  ·  ");
         card.appendChild(meta);
+
+        // Clone: open a fresh, clean-context session in the same repo (cwd).
+        // The server derives the cwd from this session's heartbeat, so the
+        // browser only sends the source id. stopPropagation keeps the card's
+        // own attach() from firing when the button is clicked.
+        if (!observed) {
+          const actions = document.createElement("div");
+          actions.className = "card-actions";
+          const cloneBtn = document.createElement("button");
+          cloneBtn.className = "btn ghost small";
+          cloneBtn.textContent = "⧉ New session";
+          cloneBtn.title = "Open a fresh session in the same repo (clean context)";
+          cloneBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            cloneSession(s.id, hb, g.device);
+          });
+          actions.appendChild(cloneBtn);
+          card.appendChild(actions);
+        }
 
         if (observed) {
           // Read-only: no terminal attach, but clicking opens a metadata panel
@@ -464,6 +487,14 @@
       }
     });
 
+    // Track whether the viewport is at the bottom. Once the user scrolls up we
+    // stop auto-pinning (so they can read history); when they return to the
+    // bottom we resume pinning. Registered once here since `term` is reused.
+    term.onScroll(() => {
+      const buf = term.buffer.active;
+      stickToBottom = buf.viewportY >= buf.length - term.rows - 1;
+    });
+
     window.addEventListener("resize", () => {
       if (fitAddon) { fitAddon.fit(); sendResize(); }
     });
@@ -510,13 +541,19 @@
     termSocket = new WebSocket(url);
     termSocket.binaryType = "arraybuffer";
 
+    // On (re)attach we want the viewport pinned to the newest output, so a
+    // long backlog doesn't leave the user scrolled up in history. The scroll
+    // listener that maintains this flag is registered once in ensureTerm().
+    stickToBottom = true;
+
     termSocket.onopen = () => { fitAndSend(); term.focus(); };
     termSocket.onmessage = (ev) => {
-      if (ev.data instanceof ArrayBuffer) {
-        term.write(decoder.decode(new Uint8Array(ev.data)));
-      } else {
-        term.write(ev.data);
-      }
+      const data = ev.data instanceof ArrayBuffer
+        ? decoder.decode(new Uint8Array(ev.data))
+        : ev.data;
+      // write() buffers/parses asynchronously; scroll in its callback so the
+      // new rows already exist in the buffer when we pin to the bottom.
+      term.write(data, () => { if (stickToBottom) term.scrollToBottom(); });
     };
     termSocket.onclose = () => {
       if (activeSessionID === id) term.write("\r\n\x1b[90m[disconnected]\x1b[0m\r\n");
@@ -629,6 +666,7 @@
     el("spawn-error").hidden = true;
     el("spawn-command").value = "";
     el("spawn-branch").value = "";
+    el("spawn-path").value = "";
     const sel = el("spawn-project");
     sel.innerHTML = "";
     for (const p of projects) {
@@ -648,13 +686,21 @@
   async function doSpawn() {
     const errBox = el("spawn-error");
     errBox.hidden = true;
+    // A manual absolute path (untrusted) overrides the project dropdown; the
+    // agent still validates it against its allowed roots.
+    const manual = el("spawn-path").value.trim();
+    const projectPath = manual || el("spawn-project").value;
+    const device = spawnDevice;
     const body = {
-      device: spawnDevice,
-      project_path: el("spawn-project").value,
+      device: device,
+      project_path: projectPath,
       command: el("spawn-command").value.trim(),
       worktree_branch: el("spawn-branch").value.trim(),
       worktree_location: el("spawn-location").value,
     };
+    // Snapshot existing managed session ids on this device so we can detect the
+    // agent-generated id of the new session once it connects.
+    const before = idsForDevice(await fetchGroups(), device);
     try {
       const r = await fetch("/api/v1/spawn", {
         method: "POST",
@@ -664,8 +710,7 @@
       });
       if (r.status === 202) {
         closeSpawn();
-        // Give the agent a moment to connect, then refresh.
-        setTimeout(poll, 1500);
+        autoAttachNew(device, projectPath, before);
         return;
       }
       const j = await r.json().catch(() => ({}));
@@ -675,6 +720,83 @@
       errBox.textContent = "Spawn request failed. Is the server reachable?";
       errBox.hidden = false;
     }
+  }
+
+  // fetchGroups returns the current device groups (or [] on failure), wrapping
+  // sessionsProbe so callers can snapshot/diff sessions without touching auth.
+  async function fetchGroups() {
+    const res = await sessionsProbe();
+    return res.ok ? (res.data || []) : [];
+  }
+
+  // idsForDevice returns a Set of managed session ids on the given device.
+  function idsForDevice(groups, device) {
+    const ids = new Set();
+    for (const g of groups || []) {
+      if (g.device !== device) continue;
+      for (const s of g.sessions || []) {
+        const observed = s.kind === "observed" || s.attachable === false;
+        if (!observed) ids.add(s.id);
+      }
+    }
+    return ids;
+  }
+
+  // cloneSession opens a fresh session in the same cwd as sourceId. The server
+  // derives the cwd (server-authoritative), so we send only the source id; on
+  // success we auto-attach the new session's live terminal.
+  async function cloneSession(sourceId, hb, device) {
+    const before = idsForDevice(await fetchGroups(), device);
+    try {
+      const r = await fetch(
+        "/api/v1/sessions/" + encodeURIComponent(sourceId) + "/clone",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: "{}",
+        },
+      );
+      const j = await r.json().catch(() => ({}));
+      if (r.status === 202) {
+        autoAttachNew(j.device || device, j.cwd || (hb && hb.cwd), before);
+        return;
+      }
+      alert(j.error || ("Clone failed (" + r.status + ")."));
+    } catch {
+      alert("Clone request failed. Is the server reachable?");
+    }
+  }
+
+  // autoAttachNew polls for a newly-connected managed session on device (one not
+  // present in `before`), preferring an exact cwd match, then attaches its live
+  // terminal so the user immediately sees a real session. The new id is
+  // agent-generated, so diff-detection against `before` is required.
+  function autoAttachNew(device, cwd, before) {
+    const deadline = Date.now() + 8000;
+    const tick = async () => {
+      const groups = await fetchGroups();
+      renderDevices(groups);
+      let anyNew = null;
+      let cwdMatch = null;
+      for (const g of groups) {
+        if (g.device !== device) continue;
+        for (const s of g.sessions || []) {
+          const observed = s.kind === "observed" || s.attachable === false;
+          if (observed || before.has(s.id)) continue;
+          anyNew = anyNew || s;
+          const shb = s.heartbeat || {};
+          if (cwd && shb.cwd === cwd) cwdMatch = cwdMatch || s;
+        }
+      }
+      const target = cwdMatch || anyNew;
+      if (target) {
+        attach(target.id, target.heartbeat || {});
+        return;
+      }
+      if (Date.now() < deadline) setTimeout(tick, 500);
+    };
+    setTimeout(tick, 500);
   }
 
   // ---- Orchestration (UI-driven multi-agent loop) ---------------------------

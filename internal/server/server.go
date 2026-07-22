@@ -141,6 +141,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/auth/callback", s.handleAuthCallback)
 	mux.HandleFunc("GET /api/v1/sessions", s.handleSessions)
 	mux.HandleFunc("POST /api/v1/spawn", s.handleSpawn)
+	mux.HandleFunc("POST /api/v1/sessions/{id}/clone", s.handleClone)
 	// UI-driven multi-agent orchestration: launch a run, list/inspect runs,
 	// stream live progress over WS, and fetch the delivered diff.
 	mux.HandleFunc("POST /api/v1/orchestrations", s.handleOrchStart)
@@ -254,6 +255,55 @@ func (s *Server) handleSpawn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "spawn requested"})
+}
+
+// handleClone opens a fresh session in the same cwd as an existing one. The
+// browser sends only the source session id; the server derives the target cwd
+// and device from that session's latest heartbeat (server-authoritative) and
+// marks the spawn TrustedCwd=true so the agent skips the roots allowlist. No
+// browser-supplied path means no traversal surface.
+func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
+	if !s.browserAuthorized(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	id := r.PathValue("id")
+	src, ok := s.reg.Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown session " + id})
+		return
+	}
+	cwd, device := src.CloneTarget()
+	if cwd == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session has no cwd to clone"})
+		return
+	}
+	// Optional overrides; a bad/empty body is tolerated (clone with defaults).
+	var body struct {
+		Command        string `json:"command"`
+		WorktreeBranch string `json:"worktree_branch"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&body)
+	agent := s.reg.AnyOnDevice(device)
+	if agent == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no live agent on device " + device})
+		return
+	}
+	if err := agent.SendSpawn(protocol.SpawnMsg{
+		ProjectPath:    cwd,
+		Command:        body.Command,
+		WorktreeBranch: body.WorktreeBranch,
+		TrustedCwd:     true,
+	}); err != nil {
+		s.log.Warn("clone send failed", "device", device, "err", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "could not reach agent"})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{
+		"status": "clone requested",
+		"device": device,
+		"cwd":    cwd,
+	})
 }
 
 // browserAuthorized reports whether a browser request is permitted. The "none"
