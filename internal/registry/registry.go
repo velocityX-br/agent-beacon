@@ -321,6 +321,20 @@ func (s *Session) SendSpawn(msg protocol.SpawnMsg) error {
 	})
 }
 
+// SendKill asks the agent that owns this session to gracefully terminate its
+// wrapped process (SIGTERM). The session ends once the child exits.
+func (s *Session) SendKill() error {
+	return s.send(protocol.Frame{Type: protocol.FrameKill, SessionID: s.ID})
+}
+
+// IsManaged reports whether this is an interactive managed session (has a PTY
+// and can be killed), as opposed to a read-only observed process.
+func (s *Session) IsManaged() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Kind == protocol.KindManaged
+}
+
 // AnyOnDevice returns a live session whose latest heartbeat reports the given
 // device name, preferring an observed (monitor daemon) session since its send
 // routes to the long-lived monitor connection that can launch new processes on
@@ -348,6 +362,25 @@ func (r *Registry) AnyOnDevice(device string) *Session {
 		}
 	}
 	return fallback
+}
+
+// HasManagedOnDeviceCwd reports whether a managed session is currently live on
+// the given device with the given working directory. Session recovery uses this
+// to skip re-spawning a workspace whose session is already running — the case
+// where the server restarted but the agent survived (no reboot) and reconnected
+// on its own.
+func (r *Registry) HasManagedOnDeviceCwd(device, cwd string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, s := range r.sessions {
+		s.mu.RLock()
+		match := s.Kind == protocol.KindManaged && s.Latest.CWD == cwd && s.Latest.Device == device
+		s.mu.RUnlock()
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 // Subscribe registers a browser terminal listener. It returns the subscriber
