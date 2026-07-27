@@ -79,12 +79,6 @@ type Config struct {
 	// JSON and reloaded on startup, so run history survives a restart. Empty
 	// disables persistence (in-memory only).
 	OrchestrationStateDir string
-
-	// SessionRecoveryStateDir is where per-managed-session recovery records are
-	// persisted as JSON so that, after a reboot kills every session, each can be
-	// re-spawned in its original cwd (with `claude --continue`) as its device's
-	// monitor reconnects. Empty disables session recovery.
-	SessionRecoveryStateDir string
 }
 
 // Server is the running dashboard server.
@@ -94,7 +88,6 @@ type Server struct {
 	log      *slog.Logger
 	sessions *auth.Store
 	orch     *orchStore
-	recover  *recoverStore
 	msgr     anthropic.Messenger
 }
 
@@ -130,7 +123,6 @@ func New(cfg Config, log *slog.Logger) *Server {
 		log:      log,
 		sessions: auth.NewStore(cfg.SessionTTL),
 		orch:     newOrchStore(cfg.OrchestrationStateDir),
-		recover:  newRecoverStore(cfg.SessionRecoveryStateDir),
 		msgr:     msgr,
 	}
 }
@@ -150,7 +142,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/sessions", s.handleSessions)
 	mux.HandleFunc("POST /api/v1/spawn", s.handleSpawn)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/clone", s.handleClone)
-	mux.HandleFunc("DELETE /api/v1/sessions/{id}", s.handleKill)
 	// UI-driven multi-agent orchestration: launch a run, list/inspect runs,
 	// stream live progress over WS, and fetch the delivered diff.
 	mux.HandleFunc("POST /api/v1/orchestrations", s.handleOrchStart)
@@ -313,35 +304,6 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 		"device": device,
 		"cwd":    cwd,
 	})
-}
-
-// handleKill gracefully terminates a managed session by asking its agent to
-// SIGTERM the wrapped Claude child. Observed (read-only) processes are refused.
-func (s *Server) handleKill(w http.ResponseWriter, r *http.Request) {
-	if !s.browserAuthorized(r) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-		return
-	}
-	id := r.PathValue("id")
-	sess, ok := s.reg.Get(id)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown session " + id})
-		return
-	}
-	if !sess.IsManaged() {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "only managed sessions can be closed"})
-		return
-	}
-	if err := sess.SendKill(); err != nil {
-		s.log.Warn("kill send failed", "session", id, "err", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "could not reach agent"})
-		return
-	}
-	// A dashboard kill is a deliberate end, not a reboot casualty: drop the
-	// recovery record so the session is not re-spawned on the next start.
-	cwd, device := sess.CloneTarget()
-	_ = s.recover.removeByDeviceCwd(device, cwd)
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "kill requested"})
 }
 
 // browserAuthorized reports whether a browser request is permitted. The "none"
@@ -561,15 +523,6 @@ func (s *Server) handleMonitorWS(w http.ResponseWriter, r *http.Request) {
 	// connection's sessions after every snapshot reconcile.
 	var projects []protocol.Project
 
-	// A monitor is the long-lived per-device launcher, so this reconnect is
-	// where lost managed sessions come back after a reboot: drain the device's
-	// pending recovery records and ask this monitor to re-spawn each one. Fired
-	// from the monitor only (not handleAgentWS) because the wrap agent's WS is
-	// tied to a single short-lived session, not the device's launcher.
-	s.recoverDevice(device, func(m protocol.SpawnMsg) error {
-		return send(protocol.Frame{Type: protocol.FrameSpawn, Spawn: &m})
-	})
-
 	for {
 		_, data, err := c.Read(ctx)
 		if err != nil {
@@ -604,11 +557,6 @@ func (s *Server) dispatchAgentFrame(sess *registry.Session, f protocol.Frame) {
 	case protocol.FrameHeartbeat:
 		if f.Heartbeat != nil {
 			s.reg.Heartbeat(sess.ID, *f.Heartbeat)
-			// This case only fires for managed sessions (observed snapshots
-			// arrive via ReconcileObserved on the monitor WS), so every
-			// heartbeat here is a recovery candidate. Persist is throttled and
-			// best-effort.
-			s.recover.saveHeartbeat(*f.Heartbeat)
 		}
 	case protocol.FrameOutput:
 		sess.PublishOutput(f.Output)

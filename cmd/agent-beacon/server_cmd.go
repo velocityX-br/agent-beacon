@@ -53,10 +53,6 @@ func serverCmd() *cobra.Command {
 		orchTotalTimout time.Duration
 		orchInputTimout time.Duration
 		orchStateDir    string
-
-		// session recovery (re-spawn managed sessions after a reboot)
-		sessRecoverDir  string
-		disableRecovery bool
 	)
 	cmd := &cobra.Command{
 		Use:   "server",
@@ -120,22 +116,6 @@ func serverCmd() *cobra.Command {
 				if dataDir, derr := config.DataDir(); derr == nil {
 					cfg.OrchestrationStateDir = filepath.Join(dataDir, "orchestrations")
 				}
-			}
-
-			// Persist per-managed-session recovery records so sessions killed
-			// by a reboot are re-spawned (with `claude --continue`) as their
-			// device's monitor reconnects. Location precedence:
-			// --session-recovery-state-dir flag ->
-			// $AGENT_BEACON_RECOVERY_STATE_DIR -> <dataDir>/recovery. Enabled by
-			// default; --no-session-recovery forces it off (empty dir => no-op).
-			cfg.SessionRecoveryStateDir = firstNonEmpty(sessRecoverDir, os.Getenv("AGENT_BEACON_RECOVERY_STATE_DIR"))
-			if cfg.SessionRecoveryStateDir == "" {
-				if dataDir, derr := config.DataDir(); derr == nil {
-					cfg.SessionRecoveryStateDir = filepath.Join(dataDir, "recovery")
-				}
-			}
-			if disableRecovery {
-				cfg.SessionRecoveryStateDir = ""
 			}
 
 			switch auth.Mode(authMode) {
@@ -238,9 +218,5 @@ func serverCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&orchTotalTimout, "orchestrate-timeout", 0, "total wall-clock budget per browser-launched run (0 => no limit)")
 	cmd.Flags().DurationVar(&orchInputTimout, "orchestrate-intervention-timeout", 0, "bounded wait per user intervention (dangerous-op auth / guidance); 0 => server default 10m (or $AGENT_BEACON_ORCH_INPUT_TIMEOUT)")
 	cmd.Flags().StringVar(&orchStateDir, "orchestrate-state-dir", "", "directory to persist finished run reports (defaults to <data-dir>/orchestrations; empty disables persistence)")
-
-	// session recovery (re-spawn managed sessions after a reboot)
-	cmd.Flags().StringVar(&sessRecoverDir, "session-recovery-state-dir", "", "directory to persist managed-session recovery records (defaults to <data-dir>/recovery; or $AGENT_BEACON_RECOVERY_STATE_DIR)")
-	cmd.Flags().BoolVar(&disableRecovery, "no-session-recovery", false, "disable re-spawning managed sessions after a reboot")
 	return cmd
 }
