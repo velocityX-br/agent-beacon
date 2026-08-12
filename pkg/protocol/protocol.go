@@ -22,6 +22,10 @@ const (
 	FrameResize FrameType = "resize"
 	// FrameSpawn is sent server->agent requesting a new session be launched.
 	FrameSpawn FrameType = "spawn"
+	// FrameKill is sent server->agent requesting the wrapped process be
+	// gracefully terminated (SIGTERM). The agent forwards the signal to its
+	// Claude child; the child exiting ends the PTY/wrapper normally.
+	FrameKill FrameType = "kill"
 	// FrameProjects is sent agent->server listing spawnable repositories.
 	FrameProjects FrameType = "projects"
 	// FrameExit is sent agent->server when the wrapped process ends.

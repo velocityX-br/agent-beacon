@@ -19,6 +19,25 @@ type termClientMsg struct {
 	Cols uint16 `json:"cols,omitempty"`
 }
 
+// browserWSOptions returns AcceptOptions for a browser-facing WebSocket with an
+// explicit same-origin policy. nhooyr/websocket already rejects a cross-origin
+// handshake by default (Origin host must equal the Host header), but we set
+// OriginPatterns explicitly — pinned to the request's own Host — so the policy
+// is intentional and auditable rather than implicit. This is the CSRF guard for
+// the terminal/orchestration sockets: a malicious page a victim visits cannot
+// open a WS into their authenticated session (the browser sends its own Origin,
+// which won't match this server's Host). Behind the tunnel, Host is the
+// trycloudflare hostname and the SPA's Origin matches it, so same-origin
+// clients keep working. If Host is somehow empty we fall back to the library's
+// default same-origin check rather than allowing all origins.
+func browserWSOptions(r *http.Request) *websocket.AcceptOptions {
+	opts := &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled}
+	if r.Host != "" {
+		opts.OriginPatterns = []string{r.Host}
+	}
+	return opts
+}
+
 // handleTerminalWS attaches a browser terminal to a live session. It subscribes
 // to the session's PTY output fan-out (server->browser) and forwards browser
 // keystrokes/resizes to the agent via the session's control sender.
@@ -38,9 +57,7 @@ func (s *Server) handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		CompressionMode: websocket.CompressionDisabled,
-	})
+	c, err := websocket.Accept(w, r, browserWSOptions(r))
 	if err != nil {
 		s.log.Warn("terminal ws accept failed", "err", err)
 		return

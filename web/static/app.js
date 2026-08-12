@@ -11,17 +11,145 @@
   const appView = el("app-view");
   const connStatus = el("conn-status");
 
+  // ---- Per-session remarks --------------------------------------------------
+  // User-authored notes that label a session with its task/goal, so the sidebar
+  // card is quickly identifiable at a glance. Stored client-side in
+  // localStorage keyed by session id (sessions are in-memory server-side, so
+  // there is nothing durable to hang a note on server-side). A single JSON
+  // object maps sessionID -> remark string.
+  const REMARKS_KEY = "agentBeaconRemarks";
+  // While a remark input is open we must NOT let the 2s poll re-render the
+  // device list, because rebuilding the DOM destroys the <input> and fires its
+  // blur handler, closing the edit mid-typing. This holds the session id being
+  // edited (or null). renderDevices() skips its wholesale re-render while set,
+  // so the user can type freely and finish by clicking outside the input.
+  let editingRemarkID = null;
+  // Set to the session id currently being drag-reordered (or null). Like
+  // editingRemarkID, renderDevices() skips its wholesale re-render while a drag
+  // is in flight so the 2s poll can't destroy the card mid-drag and abort it.
+  let draggingID = null;
+  function loadRemarks() {
+    try {
+      const raw = localStorage.getItem(REMARKS_KEY);
+      const obj = raw ? JSON.parse(raw) : {};
+      return (obj && typeof obj === "object") ? obj : {};
+    } catch {
+      return {};
+    }
+  }
+  function getRemark(id) {
+    if (!id) return "";
+    const v = loadRemarks()[id];
+    return typeof v === "string" ? v : "";
+  }
+  function setRemark(id, text) {
+    if (!id) return;
+    const all = loadRemarks();
+    const t = (text || "").trim();
+    if (t) all[id] = t; else delete all[id];
+    try {
+      localStorage.setItem(REMARKS_KEY, JSON.stringify(all));
+    } catch { /* quota / disabled storage: ignore */ }
+  }
+
+  // ---- Per-session ordering -------------------------------------------------
+  // Users can move session cards up/down to arrange them however they like.
+  // Sessions are ephemeral server-side and the server returns them in its own
+  // order, so — like remarks — the desired order is persisted client-side in
+  // localStorage as a single JSON map of sessionID -> integer rank. Lower rank
+  // sorts first. Sessions without a stored rank keep the server's relative
+  // order (rank defaults to +Infinity) and appear after ranked ones.
+  const ORDER_KEY = "agentBeaconSessionOrder";
+  function loadOrder() {
+    try {
+      const raw = localStorage.getItem(ORDER_KEY);
+      const obj = raw ? JSON.parse(raw) : {};
+      return (obj && typeof obj === "object") ? obj : {};
+    } catch {
+      return {};
+    }
+  }
+  function saveOrder(map) {
+    try {
+      localStorage.setItem(ORDER_KEY, JSON.stringify(map));
+    } catch { /* quota / disabled storage: ignore */ }
+  }
+  // rankOf returns the stored rank for an id, or +Infinity when unranked so
+  // unranked sessions fall to the end while preserving their incoming order.
+  function rankOf(order, id) {
+    const v = order[id];
+    return (typeof v === "number" && isFinite(v)) ? v : Infinity;
+  }
+  // sortSessionsByOrder returns a stable copy of sessions sorted by stored
+  // rank. Array.prototype.sort is stable (ES2019+), so equal-rank/unranked
+  // sessions retain the server's relative order.
+  function sortSessionsByOrder(sessions) {
+    const order = loadOrder();
+    return sessions
+      .map((s, i) => ({ s, i }))
+      .sort((a, b) => {
+        const ra = rankOf(order, a.s.id);
+        const rb = rankOf(order, b.s.id);
+        if (ra !== rb) return ra - rb;
+        return a.i - b.i; // tie-break: preserve incoming order
+      })
+      .map((x) => x.s);
+  }
+  // reorderByDrop moves the dragged session to a new slot in its device group.
+  // `sessions` is the group's current display order; `from` is the dragged
+  // card's index; `to` is the target slot (0..len, where len means "end").
+  // The group's display order is spliced, then every id is re-ranked to its
+  // new position so the stored order is well-defined for the whole group.
+  function reorderByDrop(sessions, from, to) {
+    if (from === to || from === to - 1) return; // no-op: dropped in place
+    const ids = sessions.map((s) => s.id);
+    const [moved] = ids.splice(from, 1);
+    // Splicing out `from` shifts every later index down by one, so a target
+    // that was after the source must be decremented to land in the right slot.
+    const insertAt = to > from ? to - 1 : to;
+    ids.splice(insertAt, 0, moved);
+    const order = loadOrder();
+    ids.forEach((id, i) => { order[id] = i; });
+    saveOrder(order);
+    if (lastGroups) renderDevices(lastGroups);
+  }
+
   let provider = "password";
   let pollTimer = null;
   let activeSessionID = null;
+  // Latest device/session snapshot from the last poll. Retained so client-side
+  // actions (e.g. reordering session cards) can trigger a re-render without
+  // waiting for the next poll.
+  let lastGroups = null;
   let term = null;
   let fitAddon = null;
   let termSocket = null;
   let decoder = new TextDecoder();
+  // ResizeObserver on the terminal host so the xterm re-fits on ANY container
+  // size change (sidebar re-render, panel toggle, pill text growth), not only
+  // on window.resize. A short debounce coalesces bursts (window drags, the 2s
+  // poll re-render) into a single fit so we don't flood the server with resize
+  // frames or flicker through intermediate widths.
+  let termResizeObserver = null;
+  let fitDebounceTimer = null;
   // On (re)attach we pin the terminal viewport to the newest output so a long
   // backlog doesn't leave the user scrolled up in history. We stay pinned only
   // until the user manually scrolls up, then respect their position.
   let stickToBottom = true;
+
+  // ---- Mobile action-first view ---------------------------------------------
+  // A touch-optimized layout for operating agents from a phone. It reuses the
+  // SAME per-session terminal WebSocket as the desktop stage — both to stream
+  // read-only context (fed into `mobileTerm`, a stdin-disabled xterm) and to
+  // send keystrokes ({type:"input"}, decoded by terminal.go into SendInput).
+  // `mobileSocket` is deliberately SEPARATE from `termSocket` so the desktop
+  // attach() path is untouched and the two can coexist via the registry's
+  // per-session fan-out. `mobileActiveID` is the session currently shown in the
+  // action panel (or null when the tap list is showing).
+  let mobileMode = false;
+  let mobileTerm = null;
+  let mobileSocket = null;
+  let mobileActiveID = null;
 
   // ---- Intervention alerts --------------------------------------------------
   // Sessions in the "waiting" state have signalled (via Claude's Notification
@@ -79,6 +207,55 @@
     loginView.hidden = true;
     appView.hidden = false;
     el("logout-btn").hidden = provider === "none";
+    el("mobile-toggle").hidden = false;
+  }
+
+  // ---- Mobile mode entry/toggle ---------------------------------------------
+  const MOBILE_KEY = "agentBeaconMobile";
+  const mobileMedia =
+    (typeof matchMedia === "function") ? matchMedia("(max-width: 640px)") : null;
+
+  // applyMobileMode switches between the desktop stage and the phone view. It
+  // toggles the body class (so CSS re-lays-out) and the #mobile-view hidden
+  // attribute (JS-controlled to avoid fighting [hidden]{display:none!important}
+  // at style.css:22), persists the choice, and updates the toggle label.
+  // Entering mobile detaches the desktop terminal (frees its socket) and paints
+  // the tap list; leaving closes any open action panel. `persist` is false only
+  // for auto-entry from the media query, so a viewport-driven choice does not
+  // masquerade as an explicit user preference (which would stop auto-follow).
+  function applyMobileMode(on, persist) {
+    mobileMode = !!on;
+    document.body.classList.toggle("mobile-mode", mobileMode);
+    el("mobile-view").hidden = !mobileMode;
+    if (persist !== false) {
+      try { localStorage.setItem(MOBILE_KEY, mobileMode ? "1" : "0"); } catch { /* ignore */ }
+    }
+    el("mobile-toggle").textContent = mobileMode ? "Desktop" : "Phone";
+    if (mobileMode) {
+      detach();
+      renderMobileList(lastGroups);
+    } else {
+      closeMobileAction();
+    }
+  }
+
+  // initMobileMode picks the initial view: an explicit stored preference wins,
+  // else the viewport width (<=640px => phone). When there is NO stored
+  // preference we follow later viewport changes (rotate/resize); once the user
+  // has toggled manually we respect that and stop auto-following.
+  function initMobileMode() {
+    let stored = null;
+    try { stored = localStorage.getItem(MOBILE_KEY); } catch { /* ignore */ }
+    const hasPref = stored === "1" || stored === "0";
+    const initial = hasPref ? stored === "1" : (mobileMedia ? mobileMedia.matches : false);
+    applyMobileMode(initial, hasPref);
+    if (mobileMedia && typeof mobileMedia.addEventListener === "function") {
+      mobileMedia.addEventListener("change", (e) => {
+        let s = null;
+        try { s = localStorage.getItem(MOBILE_KEY); } catch { /* ignore */ }
+        if (s !== "1" && s !== "0") applyMobileMode(e.matches, false);
+      });
+    }
   }
 
   async function doPasswordLogin(ev) {
@@ -133,6 +310,18 @@
   }
 
   function renderDevices(groups) {
+    // Retain the latest snapshot so client-side actions (reordering) can
+    // re-render without waiting for the next poll.
+    lastGroups = groups;
+    // A remark edit OR a drag-reorder is in progress: skip the destructive full
+    // re-render so the open <input> keeps focus / the drag isn't aborted by the
+    // card being rebuilt underneath the pointer. The next poll after the action
+    // commits refreshes the list normally. We still run attention processing so
+    // the sidebar banner/title stay current.
+    if (editingRemarkID !== null || draggingID !== null) {
+      processAttention(groups);
+      return;
+    }
     const list = el("device-list");
     list.innerHTML = "";
     if (!groups || groups.length === 0) {
@@ -176,19 +365,39 @@
       }
       wrap.appendChild(openBtn);
 
-      for (const s of g.sessions) {
+      // Only managed (interactive) sessions are shown; observed processes are
+      // hidden. Compute the visible list first, then apply the user's stored
+      // ordering, so the ▲/▼ move controls operate on exactly the cards on
+      // screen and first/last can be detected for button disabling.
+      const visible = sortSessionsByOrder(
+        g.sessions.filter((s) => !(s.kind === "observed" || s.attachable === false))
+      );
+      for (let vi = 0; vi < visible.length; vi++) {
+        const s = visible[vi];
         const hb = s.heartbeat || {};
-        const observed = s.kind === "observed" || s.attachable === false;
-        // Observed (read-only, scan-discovered) sessions are hidden from the
-        // dashboard: only interactive managed sessions are shown.
-        if (observed) continue;
         const waiting = s.state === "waiting";
         const card = document.createElement("div");
         card.className = "session-card"
-          + (observed ? " observed" : "")
           + (waiting ? " attention" : "")
           + (s.id === activeSessionID ? " active" : "");
         card.dataset.id = s.id;
+        // Enable HTML5 drag-and-drop reordering. Only a drag started from the
+        // handle (⠿) should move the card, so the card itself is draggable only
+        // while the pointer is on the handle (see the handle's mousedown/up).
+        wireCardDrag(card, visible, vi);
+
+        // Drag handle: the sole grab affordance for reorder. Living in its own
+        // column keeps the card body free for click-to-attach and the inline
+        // remark editor without ambiguity. It toggles the card's draggable flag
+        // on press so a plain click/drag elsewhere never initiates a reorder.
+        const handle = document.createElement("span");
+        handle.className = "drag-handle";
+        handle.textContent = "⠿";
+        handle.title = "Drag to reorder";
+        handle.addEventListener("mousedown", () => { card.draggable = true; });
+        handle.addEventListener("mouseup", () => { card.draggable = false; });
+        handle.addEventListener("click", (e) => e.stopPropagation());
+        card.appendChild(handle);
 
         const row1 = document.createElement("div");
         row1.className = "row1";
@@ -201,15 +410,6 @@
         cmd.textContent = workspaceName(hb) || hb.command || s.id;
         if (hb.cwd) cmd.title = hb.cwd;
         row1.appendChild(cmd);
-        // Observed processes are discovered read-only; tag them so the user
-        // knows there is no interactive terminal (unlike managed sessions).
-        if (observed) {
-          const badge = document.createElement("span");
-          badge.className = "badge observed";
-          badge.title = "Discovered process (read-only monitor). Open a managed session for an interactive terminal.";
-          badge.textContent = "observed";
-          row1.appendChild(badge);
-        }
         card.appendChild(row1);
 
         // Row 2 sits directly under the workspace index and shows the session's
@@ -237,47 +437,348 @@
         if (hb.branch) bits.push("⑂ " + hb.branch);
         if (hb.pr_url) bits.push("PR #" + (hb.pr_number || ""));
         if (hb.mcp_servers && hb.mcp_servers.length) bits.push("🔌 " + hb.mcp_servers.length);
-        if (observed && s.pid) bits.push("pid " + s.pid);
         if (hb.device_pinned) bits.push("📌");
         if (hb.cwd) bits.push(hb.cwd);
         meta.textContent = bits.join("  ·  ");
         card.appendChild(meta);
 
+        // Remark: a user-authored note labelling this session's task/goal, so
+        // the operator can locate it at a glance. Persisted in localStorage
+        // keyed by session id and survives the 2s re-render. Click the text (or
+        // the ✎ when empty) to edit inline; stopPropagation keeps the card's
+        // attach() from firing while editing.
+        const remarkRow = document.createElement("div");
+        remarkRow.className = "remark";
+        const remarkText = document.createElement("span");
+        remarkText.className = "remark-text";
+        const curRemark = getRemark(s.id);
+        if (curRemark) {
+          remarkText.textContent = "📝 " + curRemark;
+          remarkText.title = curRemark + "  (click to edit)";
+        } else {
+          remarkRow.classList.add("empty");
+          remarkText.textContent = "✎ add remark";
+          remarkText.title = "Add a note to identify this session's task";
+        }
+        remarkText.addEventListener("click", (e) => {
+          e.stopPropagation();
+          startRemarkEdit(remarkRow, s.id, curRemark);
+        });
+        remarkRow.appendChild(remarkText);
+        card.appendChild(remarkRow);
+
+        const actions = document.createElement("div");
+        actions.className = "card-actions";
+
         // Clone: open a fresh, clean-context session in the same repo (cwd).
         // The server derives the cwd from this session's heartbeat, so the
-        // browser only sends the source id. stopPropagation keeps the card's
-        // own attach() from firing when the button is clicked.
-        if (!observed) {
-          const actions = document.createElement("div");
-          actions.className = "card-actions";
-          const cloneBtn = document.createElement("button");
-          cloneBtn.className = "btn ghost small";
-          cloneBtn.textContent = "⧉ New session";
-          cloneBtn.title = "Open a fresh session in the same repo (clean context)";
-          cloneBtn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            cloneSession(s.id, hb, g.device);
-          });
-          actions.appendChild(cloneBtn);
-          card.appendChild(actions);
-        }
+        // browser only sends the source id.
+        const cloneBtn = document.createElement("button");
+        cloneBtn.className = "btn ghost small";
+        cloneBtn.textContent = "⧉ New session";
+        cloneBtn.title = "Open a fresh session in the same repo (clean context)";
+        cloneBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          cloneSession(s.id, hb, g.device);
+        });
+        actions.appendChild(cloneBtn);
 
-        if (observed) {
-          // Read-only: no terminal attach, but clicking opens a metadata panel
-          // so the user can inspect the discovered process.
-          card.title = "Read-only monitor — click to inspect (no interactive terminal)";
-          card.addEventListener("click", () => showObserved(s));
-        } else {
-          card.addEventListener("click", () => attach(s.id, hb));
-        }
+        // Close: gracefully terminate this session (SIGTERM to its Claude
+        // child, killing the terminal). Destructive/irreversible -> confirm.
+        const closeBtn = document.createElement("button");
+        closeBtn.className = "btn ghost small danger";
+        closeBtn.textContent = "✕ Close";
+        closeBtn.title = "Terminate this session and kill its terminal";
+        closeBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          killSession(s.id, hb);
+        });
+        actions.appendChild(closeBtn);
+        card.appendChild(actions);
+
+        card.addEventListener("click", () => attach(s.id, hb));
         wrap.appendChild(card);
       }
       list.appendChild(wrap);
     }
     processAttention(groups);
+    // Keep the phone view's tap list in sync with the same 2s poll snapshot.
+    if (mobileMode) renderMobileList(groups);
   }
 
-  // ---- Intervention alert processing ----------------------------------------
+  // ---- Mobile view rendering ------------------------------------------------
+
+  // renderMobileList paints the phone tap list from the latest poll snapshot.
+  // It reuses the desktop's visible-managed filter and stored ordering, but
+  // sorts WAITING sessions first so a Claude permission prompt is one tap away.
+  // Each card shows the workspace label, a state pill, and a "⚠ Needs input"
+  // badge when waiting. While the action panel is open it refreshes that
+  // session's state pill in place, and if the active session vanished (ended)
+  // it closes the panel with a notice rather than leaving a dead terminal.
+  function renderMobileList(groups) {
+    const list = el("mobile-list");
+    if (!list) return;
+
+    // Flatten to the same set of cards the desktop shows (managed + attachable),
+    // tagged with their device for the sub-label.
+    const items = [];
+    for (const g of groups || []) {
+      const visible = g.sessions.filter(
+        (s) => !(s.kind === "observed" || s.attachable === false)
+      );
+      for (const s of sortSessionsByOrder(visible)) items.push({ s, device: g.device });
+    }
+    // Waiting-first, then the user's stored order (already applied above, so a
+    // stable partition preserves it within each bucket).
+    items.sort((a, b) => (b.s.state === "waiting") - (a.s.state === "waiting"));
+
+    list.innerHTML = "";
+    if (items.length === 0) {
+      const p = document.createElement("p");
+      p.className = "muted";
+      p.style.padding = "16px";
+      p.textContent = "No interactive sessions yet.";
+      list.appendChild(p);
+    }
+    for (const { s, device } of items) {
+      const hb = s.heartbeat || {};
+      const waiting = s.state === "waiting";
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "mobile-card" + (waiting ? " attention" : "");
+      card.dataset.id = s.id;
+
+      const label = document.createElement("div");
+      label.className = "mobile-card-label";
+      label.textContent = workspaceName(hb) || hb.command || s.id;
+      card.appendChild(label);
+
+      const sub = document.createElement("div");
+      sub.className = "mobile-card-sub";
+      const st = document.createElement("span");
+      st.className = stateClass(s.state);
+      st.textContent = s.state || "idle";
+      sub.appendChild(st);
+      const dev = document.createElement("span");
+      dev.className = "muted";
+      dev.textContent = device;
+      sub.appendChild(dev);
+      if (waiting) {
+        const badge = document.createElement("span");
+        badge.className = "mobile-badge";
+        badge.textContent = "⚠ Needs input";
+        sub.appendChild(badge);
+      }
+      card.appendChild(sub);
+
+      card.addEventListener("click", () => openMobileAction(s.id, hb));
+      list.appendChild(card);
+    }
+
+    // If the action panel is open, keep its state pill fresh; if that session
+    // disappeared, close the panel with a notice.
+    if (mobileActiveID !== null) {
+      const active = items.find((it) => it.s.id === mobileActiveID);
+      if (!active) {
+        closeMobileAction("[session ended]");
+      } else {
+        const pill = el("mobile-state");
+        pill.className = stateClass(active.s.state);
+        pill.textContent = active.s.state || "idle";
+      }
+    }
+  }
+
+  // openMobileAction reveals the action panel for a session and opens its
+  // read-only context stream. A lighter analogue of the desktop attach(): no
+  // FitAddon, no resize (which would resize the shared PTY), no editable term.
+  function openMobileAction(id, hb) {
+    mobileActiveID = id;
+    el("mobile-list").hidden = true;
+    el("mobile-action").hidden = false;
+    el("mobile-title").textContent = (hb && (workspaceName(hb) || hb.command)) || id;
+    const pill = el("mobile-state");
+    pill.className = "state idle";
+    pill.textContent = "…";
+    openMobileContext(id);
+  }
+
+  // ensureMobileTerm lazily creates the read-only context terminal. Mirrors
+  // ensureTerm() but with stdin disabled and NO FitAddon / onData — the phone
+  // never edits this terminal, it only reads it and sends discrete keystrokes
+  // through the action buttons.
+  function ensureMobileTerm() {
+    if (mobileTerm) return;
+    mobileTerm = new window.Terminal({
+      disableStdin: true,
+      cursorBlink: false,
+      fontFamily: "Menlo, Monaco, 'Courier New', monospace",
+      fontSize: 12,
+      theme: { background: "#000000" },
+    });
+    mobileTerm.open(el("mobile-term"));
+  }
+
+  // openMobileContext opens the reused per-session terminal WebSocket into the
+  // read-only mobileTerm. It mirrors the WS-open half of attach() but writes to
+  // mobileSocket/mobileTerm and deliberately DOES NOT send a resize frame — the
+  // PTY size is negotiated as the minimum across subscribers, so a phone resize
+  // would shrink a desktop viewer's terminal.
+  function openMobileContext(id) {
+    ensureMobileTerm();
+    mobileTerm.reset();
+    if (mobileSocket) {
+      try { mobileSocket.close(); } catch { /* ignore */ }
+      mobileSocket = null;
+    }
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const url = `${proto}//${location.host}/api/v1/terminal/${encodeURIComponent(id)}`;
+    mobileSocket = new WebSocket(url);
+    mobileSocket.binaryType = "arraybuffer";
+    mobileSocket.onmessage = (ev) => {
+      const data = ev.data instanceof ArrayBuffer
+        ? decoder.decode(new Uint8Array(ev.data))
+        : ev.data;
+      mobileTerm.write(data, () => mobileTerm.scrollToBottom());
+    };
+    mobileSocket.onclose = () => {
+      if (mobileActiveID === id) {
+        mobileTerm.write("\r\n\x1b[90m[disconnected]\x1b[0m\r\n");
+      }
+    };
+  }
+
+  // sendMobileInput sends a keystroke byte sequence over the reused terminal
+  // socket in the SAME shape the desktop uses (terminal.go decodes {type:
+  // "input"} into sess.SendInput). No-op if the socket is not open yet.
+  function sendMobileInput(bytes) {
+    if (mobileSocket && mobileSocket.readyState === WebSocket.OPEN) {
+      mobileSocket.send(JSON.stringify({ type: "input", data: bytes }));
+    }
+  }
+
+  // closeMobileAction returns to the tap list, closing the context socket but
+  // keeping mobileTerm allocated for reuse on the next open. An optional notice
+  // is written into the terminal first (e.g. "[session ended]").
+  function closeMobileAction(notice) {
+    if (notice && mobileTerm) {
+      mobileTerm.write("\r\n\x1b[90m" + notice + "\x1b[0m\r\n");
+    }
+    if (mobileSocket) {
+      try { mobileSocket.close(); } catch { /* ignore */ }
+      mobileSocket = null;
+    }
+    mobileActiveID = null;
+    el("mobile-action").hidden = true;
+    el("mobile-list").hidden = false;
+  }
+
+  // wireCardDrag attaches HTML5 drag-and-drop handlers to a session card so the
+  // user can reorder cards within their device group by dragging the handle.
+  // `visible` is the group's current display order and `vi` this card's index.
+  //
+  // Drop position is decided by the cursor's Y within the card under the
+  // pointer: above the midpoint inserts BEFORE that card, below inserts AFTER.
+  // A `.drop-before` / `.drop-after` class draws an insertion line so the target
+  // slot is unambiguous. draggingID gates the poll re-render for the drag's
+  // duration (cleared on dragend), so the card is never rebuilt mid-drag.
+  function wireCardDrag(card, visible, vi) {
+    card.addEventListener("dragstart", (e) => {
+      draggingID = card.dataset.id;
+      card.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+      // Firefox requires data to be set for the drag to start.
+      try { e.dataTransfer.setData("text/plain", card.dataset.id); } catch { /* ignore */ }
+    });
+
+    card.addEventListener("dragover", (e) => {
+      if (draggingID === null || card.dataset.id === draggingID) return;
+      e.preventDefault(); // allow drop
+      e.dataTransfer.dropEffect = "move";
+      const rect = card.getBoundingClientRect();
+      const after = e.clientY > rect.top + rect.height / 2;
+      card.classList.toggle("drop-after", after);
+      card.classList.toggle("drop-before", !after);
+    });
+
+    const clearMarks = () => {
+      card.classList.remove("drop-before", "drop-after");
+    };
+    card.addEventListener("dragleave", clearMarks);
+
+    card.addEventListener("drop", (e) => {
+      if (draggingID === null || card.dataset.id === draggingID) { clearMarks(); return; }
+      e.preventDefault();
+      e.stopPropagation();
+      const rect = card.getBoundingClientRect();
+      const after = e.clientY > rect.top + rect.height / 2;
+      // Target slot in the group's order: this card's index, +1 when dropping
+      // below its midpoint. The dragged card's source index is looked up by id
+      // (draggingID) in the group order — the drop fires on the TARGET card, so
+      // we can't read it from this card's index. reorderByDrop normalises the
+      // source-after-target shift.
+      const to = vi + (after ? 1 : 0);
+      const from = visible.findIndex((s) => s.id === draggingID);
+      clearMarks();
+      if (from !== -1) reorderByDrop(visible, from, to);
+    });
+
+    card.addEventListener("dragend", () => {
+      // Always clear drag state so a cancelled drag (Esc / drop outside) can't
+      // wedge the poll re-render off. Clear stray marks on every card too.
+      draggingID = null;
+      card.classList.remove("dragging");
+      const listEl = el("device-list");
+      if (listEl) listEl.querySelectorAll(".drop-before, .drop-after")
+        .forEach((c) => c.classList.remove("drop-before", "drop-after"));
+    });
+  }
+
+  // startRemarkEdit swaps a card's remark row for an inline text input so the
+  // user can label the session with its task/goal. Enter or blur saves to
+  // localStorage (keyed by session id); Escape cancels. After saving we re-run
+  // the list render so the new note shows immediately and the next 2s poll
+  // won't clobber the edit-in-progress (edits complete synchronously here).
+  function startRemarkEdit(remarkRow, sessionID, current) {
+    remarkRow.innerHTML = "";
+    remarkRow.classList.remove("empty");
+    // Mark this session as being edited so the 2s poll's renderDevices() skips
+    // its full re-render and does not blow away this input (which would fire
+    // blur and close the edit prematurely — the reported bug).
+    editingRemarkID = sessionID;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "remark-input";
+    input.value = current || "";
+    input.placeholder = "Describe this session's task…";
+    input.maxLength = 200;
+    let done = false;
+    const commit = (save) => {
+      if (done) return;
+      done = true;
+      if (save) setRemark(sessionID, input.value);
+      // Editing is finished: clear the guard first, then re-render so the poll
+      // resumes updating this card normally on its next tick.
+      editingRemarkID = null;
+      poll(); // re-render the list from the latest snapshot
+    };
+    input.addEventListener("click", (e) => e.stopPropagation());
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") { e.preventDefault(); commit(true); }
+      else if (e.key === "Escape") { e.preventDefault(); commit(false); }
+    });
+    // Blur now fires only on a genuine user focus change (clicking outside the
+    // remark area) because renderDevices() no longer steals focus while this
+    // edit is active. That is exactly the requested "finish by clicking a
+    // non-add-remark part" behavior, and it saves what the user typed.
+    input.addEventListener("blur", () => commit(true));
+    remarkRow.appendChild(input);
+    input.focus();
+    input.select();
+  }
+
+
 
   // processAttention scans the rendered snapshot for sessions in the "waiting"
   // state (Claude blocked on the user), then surfaces them three ways per the
@@ -402,10 +903,16 @@
   }
 
   // openWaiting jumps to a waiting session: managed sessions attach a terminal,
-  // observed processes open their read-only detail panel.
+  // observed processes open their read-only detail panel. In phone mode a
+  // managed session opens the mobile action panel instead of the desktop
+  // terminal so the toast's Open button stays consistent with the active view.
   function openWaiting(w) {
-    if (w.attachable) attach(w.id, w.hb);
-    else if (w.session) showObserved(w.session);
+    if (w.attachable) {
+      if (mobileMode) openMobileAction(w.id, w.hb);
+      else attach(w.id, w.hb);
+    } else if (w.session) {
+      showObserved(w.session);
+    }
   }
 
   // dismissToast removes the toast for a given session id, if present.
@@ -479,7 +986,14 @@
     fitAddon = new window.FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     term.open(el("terminal"));
-    fitAddon.fit();
+    // Fit once the font is measurable. FitAddon derives cols from the measured
+    // monospace cell width, so a fit before the font loads yields a wrong width
+    // and mis-wrapped output. When fonts are already loaded this resolves on the
+    // next microtask; otherwise we defer the re-fit until the font is ready.
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(() => scheduleFit());
+    }
+    safeFit();
 
     term.onData((data) => {
       if (termSocket && termSocket.readyState === WebSocket.OPEN) {
@@ -495,29 +1009,47 @@
       stickToBottom = buf.viewportY >= buf.length - term.rows - 1;
     });
 
-    window.addEventListener("resize", () => {
-      if (fitAddon) { fitAddon.fit(); sendResize(); }
-    });
+    // Re-fit on ANY host size change, debounced. This is the primary fix for
+    // intermittent wrapping: container changes that don't fire window.resize
+    // (sidebar/pill re-layout, panel show/hide) now still re-fit the terminal.
+    if (window.ResizeObserver) {
+      termResizeObserver = new ResizeObserver(() => scheduleFit());
+      termResizeObserver.observe(el("terminal"));
+    }
+    // Keep window.resize too: it covers device pixel-ratio / zoom changes that
+    // do not alter the host's CSS box but do change the measured cell size.
+    window.addEventListener("resize", () => scheduleFit());
+  }
+
+  // safeFit fits only when a fit can produce a correct width (font measured and
+  // the host is big enough to hold at least one cell). Guards against fitting a
+  // hidden panel (display:none → 0 box) or a padding-only collapsed box, either
+  // of which would compute a degenerate 1-column size. The 24px floor clears the
+  // host's 2×8px padding so we never fit against a content box narrower than a
+  // single character cell.
+  function safeFit() {
+    if (!fitAddon || !term) return;
+    const host = el("terminal");
+    if (!host || host.clientWidth < 24 || host.clientHeight < 24) return;
+    try { fitAddon.fit(); } catch { /* xterm not ready yet */ }
+  }
+
+  // scheduleFit coalesces rapid resize signals into a single fit + resize frame
+  // on a short timer, so a window drag or a burst of ResizeObserver callbacks
+  // settles on the final size instead of thrashing through intermediates.
+  function scheduleFit() {
+    if (fitDebounceTimer) clearTimeout(fitDebounceTimer);
+    fitDebounceTimer = setTimeout(() => {
+      fitDebounceTimer = null;
+      safeFit();
+      sendResize();
+    }, 80);
   }
 
   function sendResize() {
     if (term && termSocket && termSocket.readyState === WebSocket.OPEN) {
       termSocket.send(JSON.stringify({ type: "resize", rows: term.rows, cols: term.cols }));
     }
-  }
-
-  // fitAndSend re-fits the terminal to its (now-visible) panel and reports the
-  // resulting size to the server. The double requestAnimationFrame defers the
-  // fit until after the browser has laid out the freshly-revealed terminal
-  // panel, so term.rows/cols reflect the full available space rather than a
-  // stale pre-layout (often too small) measurement. The server lets the browser
-  // drive the PTY size, so reporting the true panel size makes the dashboard
-  // terminal fill its area by default.
-  function fitAndSend() {
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (fitAddon) fitAddon.fit();
-      sendResize();
-    }));
   }
 
   function attach(id, hb) {
@@ -534,30 +1066,47 @@
 
     ensureTerm();
     term.reset();
-    fitAddon.fit();
 
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${proto}//${location.host}/api/v1/terminal/${encodeURIComponent(id)}`;
-    termSocket = new WebSocket(url);
-    termSocket.binaryType = "arraybuffer";
+    // Defer opening the WebSocket until AFTER the freshly-revealed terminal
+    // panel has been laid out and fitted to its FINAL size. The server sends the
+    // session scrollback backlog as the first frame, and term.write() parses
+    // asynchronously; if we fit after that backlog is written, xterm reflows the
+    // already-written rows to the new column count, splitting/joining lines and
+    // drifting the cursor. Fitting first (double-rAF, so the panel is laid out
+    // before we measure) makes the first backlog frame land at the correct
+    // width — no reflow race.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      // A later attach()/detach() may have won during the two rAF ticks; bail if
+      // this attach is no longer the active one.
+      if (activeSessionID !== id) return;
 
-    // On (re)attach we want the viewport pinned to the newest output, so a
-    // long backlog doesn't leave the user scrolled up in history. The scroll
-    // listener that maintains this flag is registered once in ensureTerm().
-    stickToBottom = true;
+      safeFit();
 
-    termSocket.onopen = () => { fitAndSend(); term.focus(); };
-    termSocket.onmessage = (ev) => {
-      const data = ev.data instanceof ArrayBuffer
-        ? decoder.decode(new Uint8Array(ev.data))
-        : ev.data;
-      // write() buffers/parses asynchronously; scroll in its callback so the
-      // new rows already exist in the buffer when we pin to the bottom.
-      term.write(data, () => { if (stickToBottom) term.scrollToBottom(); });
-    };
-    termSocket.onclose = () => {
-      if (activeSessionID === id) term.write("\r\n\x1b[90m[disconnected]\x1b[0m\r\n");
-    };
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      const url = `${proto}//${location.host}/api/v1/terminal/${encodeURIComponent(id)}`;
+      termSocket = new WebSocket(url);
+      termSocket.binaryType = "arraybuffer";
+
+      // On (re)attach we want the viewport pinned to the newest output, so a
+      // long backlog doesn't leave the user scrolled up in history. The scroll
+      // listener that maintains this flag is registered once in ensureTerm().
+      stickToBottom = true;
+
+      // The fit already happened before the socket opened, so we only report the
+      // settled size — no second re-fit that could reflow the backlog.
+      termSocket.onopen = () => { sendResize(); term.focus(); };
+      termSocket.onmessage = (ev) => {
+        const data = ev.data instanceof ArrayBuffer
+          ? decoder.decode(new Uint8Array(ev.data))
+          : ev.data;
+        // write() buffers/parses asynchronously; scroll in its callback so the
+        // new rows already exist in the buffer when we pin to the bottom.
+        term.write(data, () => { if (stickToBottom) term.scrollToBottom(); });
+      };
+      termSocket.onclose = () => {
+        if (activeSessionID === id) term.write("\r\n\x1b[90m[disconnected]\x1b[0m\r\n");
+      };
+    }));
 
     // Re-render list to highlight the active card.
     poll();
@@ -765,6 +1314,36 @@
       alert(j.error || ("Clone failed (" + r.status + ")."));
     } catch {
       alert("Clone request failed. Is the server reachable?");
+    }
+  }
+
+  // killSession asks the server to gracefully terminate a managed session
+  // (SIGTERM to its Claude child, which ends the PTY/wrapper = the terminal is
+  // killed). Irreversible, so it is confirm-gated. If the session being killed
+  // is the one currently attached, detach the terminal panel first. A re-poll
+  // refreshes the card list once the session drops.
+  async function killSession(id, hb) {
+    const name = (hb && hb.command) || id;
+    if (!confirm('Close session "' + name + '"?\n\nThis terminates the process and kills its terminal. This cannot be undone.')) {
+      return;
+    }
+    try {
+      const r = await fetch(
+        "/api/v1/sessions/" + encodeURIComponent(id),
+        {
+          method: "DELETE",
+          credentials: "same-origin",
+        },
+      );
+      const j = await r.json().catch(() => ({}));
+      if (r.status === 202) {
+        if (id === activeSessionID) detach();
+        poll();
+        return;
+      }
+      alert(j.error || ("Close failed (" + r.status + ")."));
+    } catch {
+      alert("Close request failed. Is the server reachable?");
     }
   }
 
@@ -1513,6 +2092,26 @@
   el("logout-btn").addEventListener("click", doLogout);
   el("refresh-btn").addEventListener("click", poll);
   el("detach-btn").addEventListener("click", detach);
+
+  // ---- Mobile view wiring ---------------------------------------------------
+  el("mobile-toggle").addEventListener("click", () => applyMobileMode(!mobileMode));
+  el("mobile-back").addEventListener("click", () => closeMobileAction());
+  // Delegated keystroke buttons: map named keys to escape sequences, else send
+  // the raw single character carried on data-send.
+  const MOBILE_KEYS = { up: "\x1b[A", down: "\x1b[B", enter: "\r", esc: "\x1b" };
+  el("mobile-action").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-send]");
+    if (!btn) return;
+    const k = btn.getAttribute("data-send");
+    sendMobileInput(Object.prototype.hasOwnProperty.call(MOBILE_KEYS, k) ? MOBILE_KEYS[k] : k);
+  });
+  el("mobile-text-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = el("mobile-text");
+    const v = input.value;
+    if (v !== "") sendMobileInput(v + "\r");
+    input.value = "";
+  });
   el("spawn-cancel").addEventListener("click", closeSpawn);
   el("spawn-go").addEventListener("click", doSpawn);
   el("orch-new-btn").addEventListener("click", showOrchLaunch);
@@ -1537,4 +2136,8 @@
     connStatus.textContent = "offline";
     connStatus.className = "pill offline";
   });
+
+  // Decide the initial view (phone vs desktop) once at load and start following
+  // viewport changes when the user has no explicit stored preference.
+  initMobileMode();
 })();

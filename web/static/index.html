@@ -16,6 +16,7 @@
     </div>
     <div class="topbar-right">
       <span id="conn-status" class="pill">connecting…</span>
+      <button id="mobile-toggle" class="btn ghost small" hidden>Phone</button>
       <button id="logout-btn" class="btn ghost" hidden>Log out</button>
     </div>
   </header>
@@ -143,6 +144,63 @@
           </div>
           <div id="orch-report" class="orch-report" hidden></div>
           <pre id="orch-diff" class="orch-diff" hidden></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- Mobile action-first view: a touch-optimized layout for operating agents
+         from a phone. It reuses the SAME terminal WebSocket as the desktop stage
+         — both for read-only context (a second, stdin-disabled xterm) and for
+         sending keystrokes ({type:"input"}). Waiting sessions are surfaced first
+         so a Claude permission prompt can be answered with one tap. Hidden by
+         default; revealed by JS (media-query auto-entry or the Phone toggle). -->
+    <section id="mobile-view" class="mobile-view" hidden>
+      <!-- Tap list: large cards, waiting-first, ⚠ badge when a session needs
+           input. Tapping a card opens the action panel below. -->
+      <div id="mobile-list" class="mobile-list"></div>
+
+      <!-- Action panel: shown once a card is tapped. A head (back + title +
+           state pill), a collapsible read-only terminal for context, and a
+           sticky action bar of big buttons + a free-text line. -->
+      <div id="mobile-action" class="mobile-action" hidden>
+        <div class="mobile-action-head">
+          <button id="mobile-back" class="btn ghost small" title="Back to list">‹ Back</button>
+          <strong id="mobile-title" class="mobile-title"></strong>
+          <span id="mobile-state" class="state idle">idle</span>
+        </div>
+
+        <!-- Read-only context: a second xterm ({disableStdin:true}) fed the same
+             WS frames as the desktop terminal. Collapsible so the action bar
+             stays reachable on a small screen. -->
+        <details id="mobile-context" class="mobile-context" open>
+          <summary>Terminal output</summary>
+          <div id="mobile-term" class="mobile-term-host"></div>
+        </details>
+
+        <!-- Sticky action bar: keystroke buttons + free text. Each button
+             carries data-send; the delegated handler maps it to a byte
+             sequence and sends it over the reused terminal socket. -->
+        <div class="mobile-actionbar">
+          <div class="tapbtn-row">
+            <button class="tapbtn ok" data-send="y">Yes</button>
+            <button class="tapbtn danger" data-send="n">No</button>
+            <button class="tapbtn" data-send="esc">Esc</button>
+          </div>
+          <div class="tapbtn-row">
+            <button class="tapbtn" data-send="1">1</button>
+            <button class="tapbtn" data-send="2">2</button>
+            <button class="tapbtn" data-send="3">3</button>
+          </div>
+          <div class="tapbtn-row">
+            <button class="tapbtn" data-send="up">↑</button>
+            <button class="tapbtn" data-send="down">↓</button>
+            <button class="tapbtn primary" data-send="enter">Enter ⏎</button>
+          </div>
+          <form id="mobile-text-form" class="mobile-text-form">
+            <input id="mobile-text" type="text" placeholder="Type a line and send…"
+              autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
+            <button class="tapbtn primary" type="submit">Send</button>
+          </form>
         </div>
       </div>
     </section>

@@ -83,12 +83,13 @@ type Config struct {
 
 // Server is the running dashboard server.
 type Server struct {
-	cfg      Config
-	reg      *registry.Registry
-	log      *slog.Logger
-	sessions *auth.Store
-	orch     *orchStore
-	msgr     anthropic.Messenger
+	cfg       Config
+	reg       *registry.Registry
+	log       *slog.Logger
+	sessions  *auth.Store
+	orch      *orchStore
+	msgr      anthropic.Messenger
+	loginRate *loginLimiter
 }
 
 // New constructs a Server with sane defaults.
@@ -118,12 +119,13 @@ func New(cfg Config, log *slog.Logger) *Server {
 			WithBearerToken(cfg.AnthropicBearer)
 	}
 	return &Server{
-		cfg:      cfg,
-		reg:      registry.New(cfg.HeartbeatTTL),
-		log:      log,
-		sessions: auth.NewStore(cfg.SessionTTL),
-		orch:     newOrchStore(cfg.OrchestrationStateDir),
-		msgr:     msgr,
+		cfg:       cfg,
+		reg:       registry.New(cfg.HeartbeatTTL),
+		log:       log,
+		sessions:  auth.NewStore(cfg.SessionTTL),
+		orch:      newOrchStore(cfg.OrchestrationStateDir),
+		msgr:      msgr,
+		loginRate: newLoginLimiter(),
 	}
 }
 
@@ -142,6 +144,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/sessions", s.handleSessions)
 	mux.HandleFunc("POST /api/v1/spawn", s.handleSpawn)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/clone", s.handleClone)
+	mux.HandleFunc("DELETE /api/v1/sessions/{id}", s.handleKill)
 	// UI-driven multi-agent orchestration: launch a run, list/inspect runs,
 	// stream live progress over WS, and fetch the delivered diff.
 	mux.HandleFunc("POST /api/v1/orchestrations", s.handleOrchStart)
@@ -306,6 +309,30 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleKill gracefully terminates a managed session. It forwards a FrameKill
+// to the agent that owns the session, which SIGTERMs the wrapped process group.
+// The session card drops once the resulting FrameExit / heartbeat gap arrives;
+// the server does not remove it here. Irreversible, so browser-gated. Observed
+// (read-only) sessions have no PTY to kill and are rejected.
+func (s *Server) handleKill(w http.ResponseWriter, r *http.Request) {
+	if !s.browserAuthorized(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	id := r.PathValue("id")
+	sess, ok := s.reg.Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown session " + id})
+		return
+	}
+	if err := sess.SendKill(); err != nil {
+		s.log.Warn("kill send failed", "session", id, "err", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "could not reach agent"})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "kill requested"})
+}
+
 // browserAuthorized reports whether a browser request is permitted. The "none"
 // provider is open; proxy-header trusts the reverse-proxy identity header; all
 // other providers require a valid session cookie.
@@ -339,9 +366,23 @@ func isTLS(r *http.Request) bool {
 }
 
 // handleLogin authenticates a password submission and issues a session cookie.
+// Attempts are rate-limited per client IP: after too many failures the IP is
+// locked out for a growing backoff window (see loginLimiter), which blunts
+// online brute force against the public login endpoint the tunnel exposes.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if auth.Mode(s.cfg.AuthProvider) != auth.ModePassword {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "password login not enabled"})
+		return
+	}
+	ip := clientIP(r)
+	if ok, wait := s.loginRate.allow(ip); !ok {
+		secs := int(wait.Seconds())
+		if secs < 1 {
+			secs = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		s.log.Warn("login throttled", "ip", ip, "retry_after_s", secs)
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many attempts, try again later"})
 		return
 	}
 	var body struct {
@@ -352,9 +393,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.cfg.Password == nil || !s.cfg.Password.Verify(body.Password) {
+		s.loginRate.recordFailure(ip)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid password"})
 		return
 	}
+	s.loginRate.recordSuccess(ip)
 	sess, err := s.sessions.Issue("password-user")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "session error"})

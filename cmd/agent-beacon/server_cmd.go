@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -53,6 +55,11 @@ func serverCmd() *cobra.Command {
 		orchTotalTimout time.Duration
 		orchInputTimout time.Duration
 		orchStateDir    string
+
+		// built-in Cloudflare quick tunnel (optional public exposure)
+		tunnel         bool
+		tunnelCmd      string
+		tunnelProtocol string
 	)
 	cmd := &cobra.Command{
 		Use:   "server",
@@ -155,6 +162,13 @@ func serverCmd() *cobra.Command {
 				return fmt.Errorf("unknown --auth mode %q (want password|oidc|proxy-header|none)", authMode)
 			}
 
+			// Refuse to expose the server to the public Internet with no browser
+			// auth: a Cloudflare quick tunnel gives anyone the URL full,
+			// unauthenticated control of the agents. Require a real auth mode.
+			if tunnel && auth.Mode(authMode) == auth.ModeNone {
+				return fmt.Errorf("--tunnel refuses --auth=none: exposing the server publicly without auth would grant anyone control; use --auth=password/--password (or oidc)")
+			}
+
 			s := server.New(cfg, log)
 
 			srv := &http.Server{
@@ -172,10 +186,37 @@ func serverCmd() *cobra.Command {
 				errc <- srv.ListenAndServe()
 			}()
 
+			// Optional built-in Cloudflare quick tunnel. It runs cloudflared as a
+			// child bound to the same shutdown ctx (auto-killed on Ctrl-C), scans
+			// its output for the *.trycloudflare.com URL, and prints a QR code.
+			var tunnelProc *exec.Cmd
+			if tunnel {
+				log.Warn("public tunnel active: the server is reachable from the Internet — auth is enforced but treat the URL as sensitive")
+				port := address
+				if _, p, perr := net.SplitHostPort(address); perr == nil && p != "" {
+					port = p
+				}
+				tc, terr := startTunnel(ctx, tunnelCmd, port, tunnelProtocol, log)
+				if terr != nil {
+					return terr
+				}
+				tunnelProc = tc
+				// Reap the child so an early cloudflared exit is logged, not left
+				// as a zombie or treated as fatal to the server.
+				go func() {
+					if werr := tunnelProc.Wait(); werr != nil && ctx.Err() == nil {
+						log.Warn("cloudflared exited", "err", werr)
+					}
+				}()
+			}
+
 			select {
 			case <-ctx.Done():
 				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
+				if tunnelProc != nil && tunnelProc.Process != nil {
+					_ = tunnelProc.Process.Kill()
+				}
 				return srv.Shutdown(shutdownCtx)
 			case err := <-errc:
 				if err == http.ErrServerClosed {
@@ -192,6 +233,11 @@ func serverCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&sessionTTL, "session-ttl", 12*time.Hour, "browser session cookie lifetime")
 	cmd.Flags().StringVar(&startURL, "start-url", "", "login start URL surfaced via login-info")
 	cmd.Flags().StringVar(&providerName, "provider-name", "", "human label for the auth provider (login page)")
+
+	// built-in Cloudflare quick tunnel (optional public exposure)
+	cmd.Flags().BoolVar(&tunnel, "tunnel", false, "expose the server over the Internet via a Cloudflare quick tunnel (requires cloudflared; prints a *.trycloudflare.com URL + QR; refused with --auth=none)")
+	cmd.Flags().StringVar(&tunnelCmd, "tunnel-cmd", "cloudflared", "cloudflared binary path/name used for --tunnel")
+	cmd.Flags().StringVar(&tunnelProtocol, "tunnel-protocol", "http2", "cloudflared edge transport for --tunnel: http2 (TCP/443, works behind firewalls that block QUIC) or auto (cloudflared's QUIC-first default)")
 
 	// password
 	cmd.Flags().StringVar(&password, "password", "", "browser password (plaintext; hashed at startup, or $AGENT_BEACON_PASSWORD)")

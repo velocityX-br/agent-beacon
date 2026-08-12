@@ -433,6 +433,22 @@ func (rn *runner) connectOnce(ctx context.Context) error {
 			if f.Resize != nil {
 				_ = pty.Setsize(rn.ptmx, &pty.Winsize{Rows: f.Resize.Rows, Cols: f.Resize.Cols})
 			}
+		case protocol.FrameKill:
+			// Dashboard-originated graceful termination. Forward SIGTERM to the
+			// child's PROCESS GROUP so Claude and any subprocesses it spawned
+			// exit together, leaving no orphans. pty.Start puts the child in its
+			// own session/process group (Setsid), so the negative-pid signal is
+			// scoped to this session only — sibling sessions and the monitor are
+			// untouched. Best-effort and non-fatal; the child exiting is what
+			// actually ends the PTY/wrapper (see cmd.Wait above).
+			if rn.cmd != nil && rn.cmd.Process != nil {
+				pid := rn.cmd.Process.Pid
+				if pgid, err := syscall.Getpgid(pid); err == nil {
+					_ = syscall.Kill(-pgid, syscall.SIGTERM)
+				} else {
+					_ = rn.cmd.Process.Signal(syscall.SIGTERM)
+				}
+			}
 		case protocol.FrameSpawn:
 			sc := spawnConfig{
 				serverURL: rn.opts.ServerURL,

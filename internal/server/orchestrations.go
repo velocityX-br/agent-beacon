@@ -539,9 +539,7 @@ func (s *Server) handleOrchEventsWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		CompressionMode: websocket.CompressionDisabled,
-	})
+	c, err := websocket.Accept(w, r, browserWSOptions(r))
 	if err != nil {
 		s.log.Warn("orchestration ws accept failed", "err", err)
 		return

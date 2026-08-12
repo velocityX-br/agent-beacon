@@ -24,3 +24,6 @@
 
 # Local exploration notes
 /.project-exploration/
+
+# Playwright MCP browser automation artifacts (console logs, page snapshots)
+/.playwright-mcp/

@@ -321,6 +321,17 @@ func (s *Session) SendSpawn(msg protocol.SpawnMsg) error {
 	})
 }
 
+// SendKill asks the agent that owns this session to gracefully terminate its
+// wrapped process (SIGTERM to the child's process group). The child exiting is
+// what actually ends the PTY/wrapper; the server does not remove the session
+// itself but lets the subsequent FrameExit / heartbeat gap drop the card.
+func (s *Session) SendKill() error {
+	return s.send(protocol.Frame{
+		Type:      protocol.FrameKill,
+		SessionID: s.ID,
+	})
+}
+
 // AnyOnDevice returns a live session whose latest heartbeat reports the given
 // device name, preferring an observed (monitor daemon) session since its send
 // routes to the long-lived monitor connection that can launch new processes on
